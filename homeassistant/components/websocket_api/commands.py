@@ -12,6 +12,7 @@ import voluptuous as vol
 
 from homeassistant.auth.models import User
 from homeassistant.auth.permissions.const import POLICY_READ
+from homeassistant.auth.permissions.events import SUBSCRIBE_ALLOWLIST
 from homeassistant.const import (
     EVENT_STATE_CHANGED,
     MATCH_ALL,
@@ -128,10 +129,6 @@ def handle_subscribe_events(
     hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Handle subscribe events command."""
-    # Circular dep
-    # pylint: disable-next=import-outside-toplevel
-    from .permissions import SUBSCRIBE_ALLOWLIST
-
     event_type = msg["event_type"]
 
     if event_type not in SUBSCRIBE_ALLOWLIST and not connection.user.is_admin:
@@ -270,7 +267,7 @@ def handle_get_states(
     states = _async_get_allowed_states(hass, connection)
 
     try:
-        serialized_states = [state.as_dict_json() for state in states]
+        serialized_states = [state.as_dict_json for state in states]
     except (ValueError, TypeError):
         pass
     else:
@@ -281,7 +278,7 @@ def handle_get_states(
     serialized_states = []
     for state in states:
         try:
-            serialized_states.append(state.as_dict_json())
+            serialized_states.append(state.as_dict_json)
         except (ValueError, TypeError):
             connection.logger.error(
                 "Unable to serialize to JSON. Bad data found at %s",
@@ -358,7 +355,7 @@ def handle_subscribe_entities(
     # to succeed for the UI to show.
     try:
         serialized_states = [
-            state.as_compressed_state_json()
+            state.as_compressed_state_json
             for state in states
             if not entity_ids or state.entity_id in entity_ids
         ]
@@ -371,7 +368,7 @@ def handle_subscribe_entities(
     serialized_states = []
     for state in states:
         try:
-            serialized_states.append(state.as_compressed_state_json())
+            serialized_states.append(state.as_compressed_state_json)
         except (ValueError, TypeError):
             connection.logger.error(
                 "Unable to serialize to JSON. Bad data found at %s",
@@ -596,13 +593,13 @@ async def handle_render_template(
 
 
 def _serialize_entity_sources(
-    entity_infos: dict[str, dict[str, str]]
+    entity_infos: dict[str, entity.EntityInfo]
 ) -> dict[str, Any]:
     """Prepare a websocket response from a dict of entity sources."""
-    result = {}
-    for entity_id, entity_info in entity_infos.items():
-        result[entity_id] = {"domain": entity_info["domain"]}
-    return result
+    return {
+        entity_id: {"domain": entity_info["domain"]}
+        for entity_id, entity_info in entity_infos.items()
+    }
 
 
 @callback

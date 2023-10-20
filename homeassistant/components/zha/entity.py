@@ -46,20 +46,22 @@ DEFAULT_UPDATE_GROUP_FROM_CHILD_DELAY = 0.5
 class BaseZhaEntity(LogMixin, entity.Entity):
     """A base class for ZHA entities."""
 
-    unique_id_suffix: str | None = None
+    _unique_id_suffix: str | None = None
+    """suffix to add to the unique_id of the entity. Used for multi
+       entities using the same cluster handler/cluster id for the entity."""
+
     _attr_has_entity_name = True
     _attr_should_poll = False
 
     def __init__(self, unique_id: str, zha_device: ZHADevice, **kwargs: Any) -> None:
         """Init ZHA entity."""
         self._unique_id: str = unique_id
-        if self.unique_id_suffix:
-            self._unique_id += f"-{self.unique_id_suffix}"
+        if self._unique_id_suffix:
+            self._unique_id += f"-{self._unique_id_suffix}"
         self._state: Any = None
         self._extra_state_attributes: dict[str, Any] = {}
         self._zha_device = zha_device
         self._unsubs: list[Callable[[], None]] = []
-        self.remove_future: asyncio.Future[Any] = asyncio.Future()
 
     @property
     def unique_id(self) -> str:
@@ -143,15 +145,7 @@ class BaseZhaEntity(LogMixin, entity.Entity):
 class ZhaEntity(BaseZhaEntity, RestoreEntity):
     """A base class for non group ZHA entities."""
 
-    def __init_subclass__(cls, id_suffix: str | None = None, **kwargs: Any) -> None:
-        """Initialize subclass.
-
-        :param id_suffix: suffix to add to the unique_id of the entity. Used for multi
-                          entities using the same cluster handler/cluster id for the entity.
-        """
-        super().__init_subclass__(**kwargs)
-        if id_suffix:
-            cls.unique_id_suffix = id_suffix
+    remove_future: asyncio.Future[Any]
 
     def __init__(
         self,
@@ -188,7 +182,7 @@ class ZhaEntity(BaseZhaEntity, RestoreEntity):
 
     async def async_added_to_hass(self) -> None:
         """Run when about to be added to hass."""
-        self.remove_future = asyncio.Future()
+        self.remove_future = self.hass.loop.create_future()
         self.async_accept_signal(
             None,
             f"{SIGNAL_REMOVE}_{self.zha_device.ieee}",
