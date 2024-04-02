@@ -39,8 +39,11 @@ from homeassistant.core import (
     HomeAssistantError,
 )
 from homeassistant.exceptions import ConfigValidationError
-from homeassistant.helpers import config_validation as cv, issue_registry as ir
-import homeassistant.helpers.check_config as check_config
+from homeassistant.helpers import (
+    check_config,
+    config_validation as cv,
+    issue_registry as ir,
+)
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import Integration, async_get_integration
@@ -466,8 +469,9 @@ def test_load_yaml_config_raises_error_if_unsafe_yaml() -> None:
     with open(YAML_PATH, "w") as fp:
         fp.write("- !!python/object/apply:os.system []")
 
-    with patch.object(os, "system") as system_mock, contextlib.suppress(
-        HomeAssistantError
+    with (
+        patch.object(os, "system") as system_mock,
+        contextlib.suppress(HomeAssistantError),
     ):
         config_util.load_yaml_config_file(YAML_PATH)
 
@@ -652,8 +656,9 @@ def test_process_config_upgrade(hass: HomeAssistant) -> None:
     ha_version = "0.92.0"
 
     mock_open = mock.mock_open()
-    with patch("homeassistant.config.open", mock_open, create=True), patch.object(
-        config_util, "__version__", "0.91.0"
+    with (
+        patch("homeassistant.config.open", mock_open, create=True),
+        patch.object(config_util, "__version__", "0.91.0"),
     ):
         opened_file = mock_open.return_value
         opened_file.readline.return_value = ha_version
@@ -1909,10 +1914,13 @@ async def test_component_config_error_processing(
             )
         ),
     )
-    with patch(
-        "homeassistant.config.async_process_component_config",
-        return_value=config_util.IntegrationConfigInfo(None, exception_info_list),
-    ), pytest.raises(ConfigValidationError) as ex:
+    with (
+        patch(
+            "homeassistant.config.async_process_component_config",
+            return_value=config_util.IntegrationConfigInfo(None, exception_info_list),
+        ),
+        pytest.raises(ConfigValidationError) as ex,
+    ):
         await config_util.async_process_component_and_handle_errors(
             hass, {}, test_integration, raise_on_failure=True
         )
@@ -2034,12 +2042,12 @@ async def test_core_config_schema_legacy_template(
     await config_util.async_process_ha_core_config(hass, config)
 
     issue_registry = ir.async_get(hass)
-    for issue_id in {"legacy_templates_true", "legacy_templates_false"}:
+    for issue_id in ("legacy_templates_true", "legacy_templates_false"):
         issue = issue_registry.async_get_issue("homeassistant", issue_id)
         assert issue if issue_id == expected_issue else not issue
 
     await config_util.async_process_ha_core_config(hass, {})
-    for issue_id in {"legacy_templates_true", "legacy_templates_false"}:
+    for issue_id in ("legacy_templates_true", "legacy_templates_false"):
         assert not issue_registry.async_get_issue("homeassistant", issue_id)
 
 
