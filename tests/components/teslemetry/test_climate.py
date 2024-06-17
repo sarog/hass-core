@@ -194,7 +194,7 @@ async def test_climate(
     with pytest.raises(
         ServiceValidationError,
         match="Cabin overheat protection does not support that temperature",
-    ) as error:
+    ):
         # Invalid Temp
         await hass.services.async_call(
             CLIMATE_DOMAIN,
@@ -202,7 +202,6 @@ async def test_climate(
             {ATTR_ENTITY_ID: [entity_id], ATTR_TEMPERATURE: 25},
             blocking=True,
         )
-        assert error
 
 
 @pytest.mark.usefixtures("entity_registry_enabled_by_default")
@@ -344,7 +343,7 @@ async def test_asleep_or_offline(
     mock_wake_up.return_value = WAKE_UP_ASLEEP
     mock_vehicle.return_value = WAKE_UP_ASLEEP
     with (
-        patch("homeassistant.components.teslemetry.entity.asyncio.sleep"),
+        patch("homeassistant.components.teslemetry.helpers.asyncio.sleep"),
         pytest.raises(HomeAssistantError) as error,
     ):
         await hass.services.async_call(
