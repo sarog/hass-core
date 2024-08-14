@@ -8,7 +8,7 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
-from yalexs.authenticator import ValidationResult
+from yalexs.authenticator_common import ValidationResult
 from yalexs.const import BRANDS, DEFAULT_BRAND
 from yalexs.manager.exceptions import CannotConnect, InvalidAuth, RequireValidation
 
@@ -66,7 +66,7 @@ async def async_validate_input(
     }
 
 
-@dataclass
+@dataclass(slots=True)
 class ValidateResult:
     """Result from validation."""
 

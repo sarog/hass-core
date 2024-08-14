@@ -1,6 +1,5 @@
 """UniFi Network switch platform tests."""
 
-from collections.abc import Callable
 from copy import deepcopy
 from datetime import timedelta
 from typing import Any
@@ -22,7 +21,7 @@ from homeassistant.components.unifi.const import (
     CONF_TRACK_DEVICES,
     DOMAIN as UNIFI_DOMAIN,
 )
-from homeassistant.config_entries import RELOAD_AFTER_UPDATE_DELAY, ConfigEntry
+from homeassistant.config_entries import RELOAD_AFTER_UPDATE_DELAY
 from homeassistant.const import (
     ATTR_DEVICE_CLASS,
     ATTR_ENTITY_ID,
@@ -37,9 +36,14 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_registry import RegistryEntryDisabler
 from homeassistant.util import dt as dt_util
 
-from .conftest import CONTROLLER_HOST
+from .conftest import (
+    CONTROLLER_HOST,
+    ConfigEntryFactoryType,
+    WebsocketMessageMock,
+    WebsocketStateManager,
+)
 
-from tests.common import async_fire_time_changed
+from tests.common import MockConfigEntry, async_fire_time_changed
 from tests.test_util.aiohttp import AiohttpClientMocker
 
 CLIENT_1 = {
@@ -761,6 +765,50 @@ WLAN = {
     "x_passphrase": "password",
 }
 
+PORT_FORWARD_PLEX = {
+    "_id": "5a32aa4ee4b0412345678911",
+    "dst_port": "12345",
+    "enabled": True,
+    "fwd_port": "23456",
+    "fwd": "10.0.0.2",
+    "name": "plex",
+    "pfwd_interface": "wan",
+    "proto": "tcp_udp",
+    "site_id": "5a32aa4ee4b0412345678910",
+    "src": "any",
+}
+
+TRAFFIC_RULE = {
+    "_id": "6452cd9b859d5b11aa002ea1",
+    "action": "BLOCK",
+    "app_category_ids": [],
+    "app_ids": [],
+    "bandwidth_limit": {
+        "download_limit_kbps": 1024,
+        "enabled": False,
+        "upload_limit_kbps": 1024,
+    },
+    "description": "Test Traffic Rule",
+    "name": "Test Traffic Rule",
+    "domains": [],
+    "enabled": True,
+    "ip_addresses": [],
+    "ip_ranges": [],
+    "matching_target": "INTERNET",
+    "network_ids": [],
+    "regions": [],
+    "schedule": {
+        "date_end": "2023-05-10",
+        "date_start": "2023-05-03",
+        "mode": "ALWAYS",
+        "repeat_on_days": [],
+        "time_all_day": False,
+        "time_range_end": "12:00",
+        "time_range_start": "09:00",
+    },
+    "target_devices": [{"client_mac": CLIENT_1["mac"], "type": "CLIENT"}],
+}
+
 
 @pytest.mark.parametrize("client_payload", [[CONTROLLER_HOST]])
 @pytest.mark.parametrize("device_payload", [[DEVICE_1]])
@@ -797,12 +845,11 @@ async def test_not_admin(hass: HomeAssistant) -> None:
 @pytest.mark.parametrize("clients_all_payload", [[BLOCKED, UNBLOCKED, CLIENT_1]])
 @pytest.mark.parametrize("dpi_app_payload", [DPI_APPS])
 @pytest.mark.parametrize("dpi_group_payload", [DPI_GROUPS])
-@pytest.mark.usefixtures("config_entry_setup")
 async def test_switches(
     hass: HomeAssistant,
     entity_registry: er.EntityRegistry,
     aioclient_mock: AiohttpClientMocker,
-    config_entry_setup: ConfigEntry,
+    config_entry_setup: MockConfigEntry,
 ) -> None:
     """Test the update_items function with some clients."""
     assert len(hass.states.async_entity_ids(SWITCH_DOMAIN)) == 3
@@ -886,7 +933,9 @@ async def test_switches(
 @pytest.mark.parametrize("dpi_app_payload", [DPI_APPS])
 @pytest.mark.parametrize("dpi_group_payload", [DPI_GROUPS])
 @pytest.mark.usefixtures("config_entry_setup")
-async def test_remove_switches(hass: HomeAssistant, mock_websocket_message) -> None:
+async def test_remove_switches(
+    hass: HomeAssistant, mock_websocket_message: WebsocketMessageMock
+) -> None:
     """Test the update_items function with some clients."""
     assert len(hass.states.async_entity_ids(SWITCH_DOMAIN)) == 2
 
@@ -923,8 +972,8 @@ async def test_remove_switches(hass: HomeAssistant, mock_websocket_message) -> N
 async def test_block_switches(
     hass: HomeAssistant,
     aioclient_mock: AiohttpClientMocker,
-    mock_websocket_message,
-    config_entry_setup: ConfigEntry,
+    mock_websocket_message: WebsocketMessageMock,
+    config_entry_setup: MockConfigEntry,
 ) -> None:
     """Test the update_items function with some clients."""
     assert len(hass.states.async_entity_ids(SWITCH_DOMAIN)) == 2
@@ -984,7 +1033,7 @@ async def test_block_switches(
 @pytest.mark.parametrize("dpi_group_payload", [DPI_GROUPS])
 @pytest.mark.usefixtures("config_entry_setup")
 async def test_dpi_switches(
-    hass: HomeAssistant, mock_websocket_message, mock_websocket_state
+    hass: HomeAssistant, mock_websocket_message: WebsocketMessageMock
 ) -> None:
     """Test the update_items function with some clients."""
     assert len(hass.states.async_entity_ids(SWITCH_DOMAIN)) == 1
@@ -999,16 +1048,6 @@ async def test_dpi_switches(
 
     assert hass.states.get("switch.block_media_streaming").state == STATE_OFF
 
-    # Availability signalling
-
-    # Controller disconnects
-    await mock_websocket_state.disconnect()
-    assert hass.states.get("switch.block_media_streaming").state == STATE_UNAVAILABLE
-
-    # Controller reconnects
-    await mock_websocket_state.reconnect()
-    assert hass.states.get("switch.block_media_streaming").state == STATE_OFF
-
     # Remove app
     mock_websocket_message(data=DPI_GROUP_REMOVE_APP)
     await hass.async_block_till_done()
@@ -1021,7 +1060,7 @@ async def test_dpi_switches(
 @pytest.mark.parametrize("dpi_group_payload", [DPI_GROUPS])
 @pytest.mark.usefixtures("config_entry_setup")
 async def test_dpi_switches_add_second_app(
-    hass: HomeAssistant, mock_websocket_message
+    hass: HomeAssistant, mock_websocket_message: WebsocketMessageMock
 ) -> None:
     """Test the update_items function with some clients."""
     assert len(hass.states.async_entity_ids(SWITCH_DOMAIN)) == 1
@@ -1071,6 +1110,62 @@ async def test_dpi_switches_add_second_app(
     assert hass.states.get("switch.block_media_streaming").state == STATE_ON
 
 
+@pytest.mark.parametrize(("traffic_rule_payload"), [([TRAFFIC_RULE])])
+async def test_traffic_rules(
+    hass: HomeAssistant,
+    aioclient_mock: AiohttpClientMocker,
+    config_entry_setup: MockConfigEntry,
+    traffic_rule_payload: list[dict[str, Any]],
+) -> None:
+    """Test control of UniFi traffic rules."""
+
+    assert len(hass.states.async_entity_ids(SWITCH_DOMAIN)) == 1
+
+    # Validate state object
+    switch_1 = hass.states.get("switch.unifi_network_test_traffic_rule")
+    assert switch_1.state == STATE_ON
+    assert switch_1.attributes.get(ATTR_DEVICE_CLASS) == SwitchDeviceClass.SWITCH
+
+    traffic_rule = deepcopy(traffic_rule_payload[0])
+
+    # Disable traffic rule
+    aioclient_mock.put(
+        f"https://{config_entry_setup.data[CONF_HOST]}:1234"
+        f"/v2/api/site/{config_entry_setup.data[CONF_SITE_ID]}/trafficrules/{traffic_rule['_id']}",
+    )
+
+    call_count = aioclient_mock.call_count
+
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        "turn_off",
+        {"entity_id": "switch.unifi_network_test_traffic_rule"},
+        blocking=True,
+    )
+    # Updating the value for traffic rules will make another call to retrieve the values
+    assert aioclient_mock.call_count == call_count + 2
+    expected_disable_call = deepcopy(traffic_rule)
+    expected_disable_call["enabled"] = False
+
+    assert aioclient_mock.mock_calls[call_count][2] == expected_disable_call
+
+    call_count = aioclient_mock.call_count
+
+    # Enable traffic rule
+    await hass.services.async_call(
+        SWITCH_DOMAIN,
+        "turn_on",
+        {"entity_id": "switch.unifi_network_test_traffic_rule"},
+        blocking=True,
+    )
+
+    expected_enable_call = deepcopy(traffic_rule)
+    expected_enable_call["enabled"] = True
+
+    assert aioclient_mock.call_count == call_count + 2
+    assert aioclient_mock.mock_calls[call_count][2] == expected_enable_call
+
+
 @pytest.mark.parametrize(
     ("device_payload", "entity_id", "outlet_index", "expected_switches"),
     [
@@ -1082,10 +1177,9 @@ async def test_dpi_switches_add_second_app(
 async def test_outlet_switches(
     hass: HomeAssistant,
     aioclient_mock: AiohttpClientMocker,
-    mock_websocket_message,
-    config_entry_setup: ConfigEntry,
+    mock_websocket_message: WebsocketMessageMock,
+    config_entry_setup: MockConfigEntry,
     device_payload: list[dict[str, Any]],
-    mock_websocket_state,
     entity_id: str,
     outlet_index: int,
     expected_switches: int,
@@ -1144,16 +1238,6 @@ async def test_outlet_switches(
         "outlet_overrides": expected_on_overrides
     }
 
-    # Availability signalling
-
-    # Controller disconnects
-    await mock_websocket_state.disconnect()
-    assert hass.states.get(f"switch.{entity_id}").state == STATE_UNAVAILABLE
-
-    # Controller reconnects
-    await mock_websocket_state.reconnect()
-    assert hass.states.get(f"switch.{entity_id}").state == STATE_OFF
-
     # Device gets disabled
     device_1["disabled"] = True
     mock_websocket_message(message=MessageKey.DEVICE, data=device_1)
@@ -1189,7 +1273,7 @@ async def test_outlet_switches(
 )
 @pytest.mark.usefixtures("config_entry_setup")
 async def test_new_client_discovered_on_block_control(
-    hass: HomeAssistant, mock_websocket_message
+    hass: HomeAssistant, mock_websocket_message: WebsocketMessageMock
 ) -> None:
     """Test if 2nd update has a new client."""
     assert len(hass.states.async_entity_ids(SWITCH_DOMAIN)) == 0
@@ -1207,7 +1291,9 @@ async def test_new_client_discovered_on_block_control(
 )
 @pytest.mark.parametrize("clients_all_payload", [[BLOCKED, UNBLOCKED]])
 async def test_option_block_clients(
-    hass: HomeAssistant, config_entry_setup: ConfigEntry, clients_all_payload
+    hass: HomeAssistant,
+    config_entry_setup: MockConfigEntry,
+    clients_all_payload: list[dict[str, Any]],
 ) -> None:
     """Test the changes to option reflects accordingly."""
     assert len(hass.states.async_entity_ids(SWITCH_DOMAIN)) == 1
@@ -1255,7 +1341,7 @@ async def test_option_block_clients(
 @pytest.mark.parametrize("dpi_app_payload", [DPI_APPS])
 @pytest.mark.parametrize("dpi_group_payload", [DPI_GROUPS])
 async def test_option_remove_switches(
-    hass: HomeAssistant, config_entry_setup: ConfigEntry
+    hass: HomeAssistant, config_entry_setup: MockConfigEntry
 ) -> None:
     """Test removal of DPI switch when options updated."""
     assert len(hass.states.async_entity_ids(SWITCH_DOMAIN)) == 1
@@ -1273,9 +1359,8 @@ async def test_poe_port_switches(
     hass: HomeAssistant,
     entity_registry: er.EntityRegistry,
     aioclient_mock: AiohttpClientMocker,
-    mock_websocket_message,
-    mock_websocket_state,
-    config_entry_setup: ConfigEntry,
+    mock_websocket_message: WebsocketMessageMock,
+    config_entry_setup: MockConfigEntry,
     device_payload: list[dict[str, Any]],
 ) -> None:
     """Test PoE port entities work."""
@@ -1292,7 +1377,6 @@ async def test_poe_port_switches(
     entity_registry.async_update_entity(
         entity_id="switch.mock_name_port_2_poe", disabled_by=None
     )
-    # await hass.async_block_till_done()
 
     async_fire_time_changed(
         hass,
@@ -1356,16 +1440,6 @@ async def test_poe_port_switches(
         ]
     }
 
-    # Availability signalling
-
-    # Controller disconnects
-    await mock_websocket_state.disconnect()
-    assert hass.states.get("switch.mock_name_port_1_poe").state == STATE_UNAVAILABLE
-
-    # Controller reconnects
-    await mock_websocket_state.reconnect()
-    assert hass.states.get("switch.mock_name_port_1_poe").state == STATE_OFF
-
     # Device gets disabled
     device_1["disabled"] = True
     mock_websocket_message(message=MessageKey.DEVICE, data=device_1)
@@ -1384,9 +1458,8 @@ async def test_wlan_switches(
     hass: HomeAssistant,
     entity_registry: er.EntityRegistry,
     aioclient_mock: AiohttpClientMocker,
-    mock_websocket_message,
-    mock_websocket_state,
-    config_entry_setup: ConfigEntry,
+    mock_websocket_message: WebsocketMessageMock,
+    config_entry_setup: MockConfigEntry,
     wlan_payload: list[dict[str, Any]],
 ) -> None:
     """Test control of UniFi WLAN availability."""
@@ -1435,43 +1508,14 @@ async def test_wlan_switches(
     assert aioclient_mock.call_count == 2
     assert aioclient_mock.mock_calls[1][2] == {"enabled": True}
 
-    # Availability signalling
 
-    # Controller disconnects
-    await mock_websocket_state.disconnect()
-    assert hass.states.get("switch.ssid_1").state == STATE_UNAVAILABLE
-
-    # Controller reconnects
-    await mock_websocket_state.reconnect()
-    assert hass.states.get("switch.ssid_1").state == STATE_OFF
-
-
-@pytest.mark.parametrize(
-    "port_forward_payload",
-    [
-        [
-            {
-                "_id": "5a32aa4ee4b0412345678911",
-                "dst_port": "12345",
-                "enabled": True,
-                "fwd_port": "23456",
-                "fwd": "10.0.0.2",
-                "name": "plex",
-                "pfwd_interface": "wan",
-                "proto": "tcp_udp",
-                "site_id": "5a32aa4ee4b0412345678910",
-                "src": "any",
-            }
-        ]
-    ],
-)
+@pytest.mark.parametrize("port_forward_payload", [[PORT_FORWARD_PLEX]])
 async def test_port_forwarding_switches(
     hass: HomeAssistant,
     entity_registry: er.EntityRegistry,
     aioclient_mock: AiohttpClientMocker,
-    mock_websocket_message,
-    mock_websocket_state,
-    config_entry_setup: ConfigEntry,
+    mock_websocket_message: WebsocketMessageMock,
+    config_entry_setup: MockConfigEntry,
     port_forward_payload: list[dict[str, Any]],
 ) -> None:
     """Test control of UniFi port forwarding."""
@@ -1522,16 +1566,6 @@ async def test_port_forwarding_switches(
     assert aioclient_mock.call_count == 2
     assert aioclient_mock.mock_calls[1][2] == port_forward_payload[0]
 
-    # Availability signalling
-
-    # Controller disconnects
-    await mock_websocket_state.disconnect()
-    assert hass.states.get("switch.unifi_network_plex").state == STATE_UNAVAILABLE
-
-    # Controller reconnects
-    await mock_websocket_state.reconnect()
-    assert hass.states.get("switch.unifi_network_plex").state == STATE_OFF
-
     # Remove entity on deleted message
     mock_websocket_message(
         message=MessageKey.PORT_FORWARD_DELETED, data=port_forward_payload[0]
@@ -1579,9 +1613,9 @@ async def test_port_forwarding_switches(
 async def test_updating_unique_id(
     hass: HomeAssistant,
     entity_registry: er.EntityRegistry,
-    config_entry_factory: Callable[[], ConfigEntry],
-    config_entry: ConfigEntry,
-    device_payload,
+    config_entry_factory: ConfigEntryFactoryType,
+    config_entry: MockConfigEntry,
+    device_payload: list[dict[str, Any]],
 ) -> None:
     """Verify outlet control and poe control unique ID update works."""
     entity_registry.async_get_or_create(
@@ -1604,3 +1638,40 @@ async def test_updating_unique_id(
     assert len(hass.states.async_entity_ids(SWITCH_DOMAIN)) == 2
     assert hass.states.get("switch.plug_outlet_1")
     assert hass.states.get("switch.switch_port_1_poe")
+
+
+@pytest.mark.parametrize(
+    "config_entry_options", [{CONF_BLOCK_CLIENT: [UNBLOCKED["mac"]]}]
+)
+@pytest.mark.parametrize("client_payload", [[UNBLOCKED]])
+@pytest.mark.parametrize("device_payload", [[DEVICE_1, OUTLET_UP1]])
+@pytest.mark.parametrize("dpi_app_payload", [DPI_APPS])
+@pytest.mark.parametrize("dpi_group_payload", [DPI_GROUPS])
+@pytest.mark.parametrize("port_forward_payload", [[PORT_FORWARD_PLEX]])
+@pytest.mark.parametrize("wlan_payload", [[WLAN]])
+@pytest.mark.usefixtures("config_entry_setup")
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_hub_state_change(
+    hass: HomeAssistant, mock_websocket_state: WebsocketStateManager
+) -> None:
+    """Verify entities state reflect on hub connection becoming unavailable."""
+    entity_ids = (
+        "switch.block_client_2",
+        "switch.mock_name_port_1_poe",
+        "switch.plug_outlet_1",
+        "switch.block_media_streaming",
+        "switch.unifi_network_plex",
+        "switch.ssid_1",
+    )
+    for entity_id in entity_ids:
+        assert hass.states.get(entity_id).state == STATE_ON
+
+    # Controller disconnects
+    await mock_websocket_state.disconnect()
+    for entity_id in entity_ids:
+        assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+
+    # Controller reconnects
+    await mock_websocket_state.reconnect()
+    for entity_id in entity_ids:
+        assert hass.states.get(entity_id).state == STATE_ON
