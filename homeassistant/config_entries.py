@@ -18,7 +18,7 @@ from copy import deepcopy
 from datetime import datetime
 from enum import Enum, StrEnum
 import functools
-from functools import cached_property
+from functools import cache, cached_property
 import logging
 from random import randint
 from types import MappingProxyType
@@ -106,11 +106,6 @@ SOURCE_ZEROCONF = "zeroconf"
 # source and while it exists normal discoveries with the same unique id are ignored.
 SOURCE_IGNORE = "ignore"
 
-# This is used when a user uses the "Stop Ignoring" button in the UI (the
-# config_entries/ignore_flow websocket command). It's triggered after the
-# "ignore" config entry has been removed and unloaded.
-SOURCE_UNIGNORE = "unignore"
-
 # This is used to signal that re-authentication is required by the user.
 SOURCE_REAUTH = "reauth"
 
@@ -179,7 +174,6 @@ DISCOVERY_SOURCES = {
     SOURCE_INTEGRATION_DISCOVERY,
     SOURCE_MQTT,
     SOURCE_SSDP,
-    SOURCE_UNIGNORE,
     SOURCE_USB,
     SOURCE_ZEROCONF,
 }
@@ -191,6 +185,15 @@ EVENT_FLOW_DISCOVERED = "config_entry_discovered"
 SIGNAL_CONFIG_ENTRY_CHANGED = SignalType["ConfigEntryChange", "ConfigEntry"](
     "config_entry_changed"
 )
+
+
+@cache
+def signal_discovered_config_entry_removed(
+    discovery_domain: str,
+) -> SignalType[ConfigEntry]:
+    """Format signal."""
+    return SignalType(f"{discovery_domain}_discovered_config_entry_removed")
+
 
 NO_RESET_TRIES_STATES = {
     ConfigEntryState.SETUP_RETRY,
@@ -318,7 +321,7 @@ class ConfigEntry(Generic[_DataT]):
     _tries: int
     created_at: datetime
     modified_at: datetime
-    discovery_keys: tuple[DiscoveryKey, ...]
+    discovery_keys: MappingProxyType[str, tuple[DiscoveryKey, ...]]
 
     def __init__(
         self,
@@ -326,7 +329,7 @@ class ConfigEntry(Generic[_DataT]):
         created_at: datetime | None = None,
         data: Mapping[str, Any],
         disabled_by: ConfigEntryDisabler | None = None,
-        discovery_keys: tuple[DiscoveryKey, ...],
+        discovery_keys: MappingProxyType[str, tuple[DiscoveryKey, ...]],
         domain: str,
         entry_id: str | None = None,
         minor_version: int,
@@ -955,7 +958,7 @@ class ConfigEntry(Generic[_DataT]):
         return {
             "created_at": self.created_at.isoformat(),
             "data": dict(self.data),
-            "discovery_keys": self.discovery_keys,
+            "discovery_keys": dict(self.discovery_keys),
             "disabled_by": self.disabled_by,
             "domain": self.domain,
             "entry_id": self.entry_id,
@@ -1255,7 +1258,7 @@ class ConfigEntriesFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
         # a single config entry, but which already has an entry
         if (
             context.get("source")
-            not in {SOURCE_IGNORE, SOURCE_REAUTH, SOURCE_UNIGNORE, SOURCE_RECONFIGURE}
+            not in {SOURCE_IGNORE, SOURCE_REAUTH, SOURCE_RECONFIGURE}
             and self.config_entries.async_has_entries(handler, include_ignore=False)
             and await _support_single_config_entry_only(self.hass, handler)
         ):
@@ -1379,15 +1382,26 @@ class ConfigEntriesFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
                         result["handler"], unique_id
                     )
                 )
-                and entry.source == SOURCE_IGNORE
-                and discovery_key not in (known_discovery_keys := entry.discovery_keys)
+                and discovery_key
+                not in (
+                    known_discovery_keys := entry.discovery_keys.get(
+                        discovery_key.domain, ()
+                    )
+                )
             ):
-                new_discovery_keys = tuple([*known_discovery_keys, discovery_key][-10:])
+                new_discovery_keys = MappingProxyType(
+                    entry.discovery_keys
+                    | {
+                        discovery_key.domain: tuple(
+                            [*known_discovery_keys, discovery_key][-10:]
+                        )
+                    }
+                )
                 _LOGGER.debug(
                     "Updating discovery keys for %s entry %s %s -> %s",
                     entry.domain,
                     unique_id,
-                    known_discovery_keys,
+                    entry.discovery_keys,
                     new_discovery_keys,
                 )
                 self.config_entries.async_update_entry(
@@ -1450,7 +1464,11 @@ class ConfigEntriesFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
             await self.config_entries.async_unload(existing_entry.entry_id)
 
         discovery_key = flow.context.get("discovery_key")
-        discovery_keys = (discovery_key,) if discovery_key else ()
+        discovery_keys = (
+            MappingProxyType({discovery_key.domain: (discovery_key,)})
+            if discovery_key
+            else MappingProxyType({})
+        )
         entry = ConfigEntry(
             data=result["data"],
             discovery_keys=discovery_keys,
@@ -1525,6 +1543,35 @@ class ConfigEntriesFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
             ),
             notification_id=DISCOVERY_NOTIFICATION_ID,
         )
+
+    @callback
+    def async_has_matching_discovery_flow(
+        self, handler: str, match_context: dict[str, Any], data: Any
+    ) -> bool:
+        """Check if an existing matching discovery flow is in progress.
+
+        A flow with the same handler, context, and data.
+
+        If match_context is passed, only return flows with a context that is a
+        superset of match_context.
+        """
+        if not (flows := self._handler_progress_index.get(handler)):
+            return False
+        match_items = match_context.items()
+        for progress in flows:
+            if match_items <= progress.context.items() and progress.init_data == data:
+                return True
+        return False
+
+    @callback
+    def async_has_matching_flow(self, flow: ConfigFlow) -> bool:
+        """Check if an existing matching flow is in progress."""
+        if not (flows := self._handler_progress_index.get(flow.handler)):
+            return False
+        for other_flow in set(flows):
+            if other_flow is not flow and flow.is_matching(other_flow):  # type: ignore[arg-type]
+                return True
+        return False
 
 
 class ConfigEntryItems(UserDict[str, ConfigEntry]):
@@ -1684,7 +1731,7 @@ class ConfigEntryStore(storage.Store[dict[str, list[dict[str, Any]]]]):
             if old_minor_version < 4:
                 # Version 1.4 adds discovery_keys
                 for entry in data["entries"]:
-                    entry["discovery_keys"] = []
+                    entry["discovery_keys"] = {}
 
         if old_major_version > 1:
             raise NotImplementedError
@@ -1831,21 +1878,13 @@ class ConfigEntries:
                 issue_id = f"config_entry_reauth_{entry.domain}_{entry.entry_id}"
                 ir.async_delete_issue(self.hass, HOMEASSISTANT_DOMAIN, issue_id)
 
-        # After we have fully removed an "ignore" config entry we can try and rediscover
-        # it so that a user is able to immediately start configuring it. We do this by
-        # starting a new flow with the 'unignore' step. If the integration doesn't
-        # implement async_step_unignore then this will be a no-op.
-        if entry.source == SOURCE_IGNORE:
-            self.hass.async_create_task_internal(
-                self.hass.config_entries.flow.async_init(
-                    entry.domain,
-                    context={"source": SOURCE_UNIGNORE},
-                    data={"unique_id": entry.unique_id},
-                ),
-                f"config entry unignore {entry.title} {entry.domain} {entry.unique_id}",
-            )
-
         self._async_dispatch(ConfigEntryChange.REMOVED, entry)
+        for discovery_domain in entry.discovery_keys:
+            async_dispatcher_send_internal(
+                self.hass,
+                signal_discovered_config_entry_removed(discovery_domain),
+                entry,
+            )
         return {"require_restart": not unload_success}
 
     @callback
@@ -1873,8 +1912,11 @@ class ConfigEntries:
                 created_at=datetime.fromisoformat(entry["created_at"]),
                 data=entry["data"],
                 disabled_by=try_parse_enum(ConfigEntryDisabler, entry["disabled_by"]),
-                discovery_keys=tuple(
-                    DiscoveryKey.from_json_dict(key) for key in entry["discovery_keys"]
+                discovery_keys=MappingProxyType(
+                    {
+                        domain: tuple(DiscoveryKey.from_json_dict(key) for key in keys)
+                        for domain, keys in entry["discovery_keys"].items()
+                    }
                 ),
                 domain=entry["domain"],
                 entry_id=entry_id,
@@ -2032,7 +2074,8 @@ class ConfigEntries:
         entry: ConfigEntry,
         *,
         data: Mapping[str, Any] | UndefinedType = UNDEFINED,
-        discovery_keys: tuple[DiscoveryKey, ...] | UndefinedType = UNDEFINED,
+        discovery_keys: MappingProxyType[str, tuple[DiscoveryKey, ...]]
+        | UndefinedType = UNDEFINED,
         minor_version: int | UndefinedType = UNDEFINED,
         options: Mapping[str, Any] | UndefinedType = UNDEFINED,
         pref_disable_new_entities: bool | UndefinedType = UNDEFINED,
@@ -2510,10 +2553,6 @@ class ConfigFlow(ConfigEntryBaseFlow):
         await self.async_set_unique_id(user_input["unique_id"], raise_on_progress=False)
         return self.async_create_entry(title=user_input["title"], data={})
 
-    async def async_step_unignore(self, user_input: dict[str, Any]) -> ConfigFlowResult:
-        """Rediscover a config entry by it's unique_id."""
-        return self.async_abort(reason="not_implemented")
-
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -2682,6 +2721,10 @@ class ConfigFlow(ConfigEntryBaseFlow):
         if reload_even_if_entry_is_unchanged or result:
             self.hass.config_entries.async_schedule_reload(entry.entry_id)
         return self.async_abort(reason=reason)
+
+    def is_matching(self, other_flow: Self) -> bool:
+        """Return True if other_flow is matching this flow."""
+        raise NotImplementedError
 
 
 class OptionsFlowManager(data_entry_flow.FlowManager[ConfigFlowResult]):
