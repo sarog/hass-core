@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, call
 from chip.clusters import Objects as clusters
 from matter_server.client.models.node import MatterNode
 import pytest
+from syrupy import SnapshotAssertion
 
 from homeassistant.components.cover import (
     STATE_CLOSED,
@@ -14,13 +15,27 @@ from homeassistant.components.cover import (
     STATE_OPENING,
     CoverEntityFeature,
 )
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
-from .common import set_node_attribute, trigger_subscription_callback
+from .common import (
+    set_node_attribute,
+    snapshot_matter_entities,
+    trigger_subscription_callback,
+)
 
 
-# This tests needs to be adjusted to remove lingering tasks
-@pytest.mark.parametrize("expected_lingering_tasks", [True])
+@pytest.mark.usefixtures("matter_devices")
+async def test_covers(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    snapshot: SnapshotAssertion,
+) -> None:
+    """Test covers."""
+    snapshot_matter_entities(hass, entity_registry, snapshot, Platform.COVER)
+
+
 @pytest.mark.parametrize(
     ("node_fixture", "entity_id"),
     [
@@ -91,8 +106,6 @@ async def test_cover(
     matter_client.send_device_command.reset_mock()
 
 
-# This tests needs to be adjusted to remove lingering tasks
-@pytest.mark.parametrize("expected_lingering_tasks", [True])
 @pytest.mark.parametrize(
     ("node_fixture", "entity_id"),
     [
@@ -141,8 +154,6 @@ async def test_cover_lift(
     assert state.state == STATE_OPENING
 
 
-# This tests needs to be adjusted to remove lingering tasks
-@pytest.mark.parametrize("expected_lingering_tasks", [True])
 @pytest.mark.parametrize(
     ("node_fixture", "entity_id"),
     [
@@ -180,8 +191,6 @@ async def test_cover_lift_only(
     assert state.attributes["supported_features"] & CoverEntityFeature.SET_POSITION != 0
 
 
-# This tests needs to be adjusted to remove lingering tasks
-@pytest.mark.parametrize("expected_lingering_tasks", [True])
 @pytest.mark.parametrize(
     ("node_fixture", "entity_id"),
     [
@@ -226,8 +235,6 @@ async def test_cover_position_aware_lift(
     assert state.state == STATE_CLOSED
 
 
-# This tests needs to be adjusted to remove lingering tasks
-@pytest.mark.parametrize("expected_lingering_tasks", [True])
 @pytest.mark.parametrize(
     ("node_fixture", "entity_id"),
     [
@@ -278,8 +285,6 @@ async def test_cover_tilt(
     assert state.state == STATE_OPENING
 
 
-# This tests needs to be adjusted to remove lingering tasks
-@pytest.mark.parametrize("expected_lingering_tasks", [True])
 @pytest.mark.parametrize(
     ("node_fixture", "entity_id"),
     [
@@ -315,8 +320,6 @@ async def test_cover_tilt_only(
     )
 
 
-# This tests needs to be adjusted to remove lingering tasks
-@pytest.mark.parametrize("expected_lingering_tasks", [True])
 @pytest.mark.parametrize(
     ("node_fixture", "entity_id"),
     [
