@@ -2125,7 +2125,7 @@ pyoppleio-legacy==1.0.8
 pyosoenergyapi==1.1.4
 
 # homeassistant.components.opentherm_gw
-pyotgw==2.2.1
+pyotgw==2.2.2
 
 # homeassistant.auth.mfa_modules.notify
 # homeassistant.auth.mfa_modules.totp
@@ -2887,7 +2887,7 @@ unifi_ap==0.0.1
 unifiled==0.11
 
 # homeassistant.components.zha
-universal-silabs-flasher==0.0.22
+universal-silabs-flasher==0.0.23
 
 # homeassistant.components.upb
 upb-lib==0.5.8
@@ -3053,7 +3053,7 @@ zeroconf==0.135.0
 zeversolar==0.3.1
 
 # homeassistant.components.zha
-zha==0.0.34
+zha==0.0.35
 
 # homeassistant.components.zhong_hong
 zhong-hong-hvac==1.0.12
