@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # PROVIDE: homeassistant
-# REQUIRE: LOGIN
+# REQUIRE: LOGIN DAEMON NETWORKING
 # KEYWORD: shutdown
 #
 # VERSION: 20241017
