@@ -1,5 +1,24 @@
 {
   "entity": {
+    "button": {
+      "art_frame_next_picture": {
+        "default": "mdi:chevron-right-box"
+      },
+      "art_frame_previous_picture": {
+        "default": "mdi:chevron-left-box"
+      }
+    },
+    "climate": {
+      "smart_radiator_thermostat": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "schedule": "mdi:clock-outline"
+            }
+          }
+        }
+      }
+    },
     "fan": {
       "air_purifier": {
         "default": "mdi:air-purifier",
@@ -9,10 +28,26 @@
         "state_attributes": {
           "preset_mode": {
             "state": {
-              "normal": "mdi:fan",
               "auto": "mdi:auto-mode",
+              "normal": "mdi:fan",
               "pet": "mdi:paw",
               "sleep": "mdi:power-sleep"
+            }
+          }
+        }
+      }
+    },
+    "humidifier": {
+      "evaporative_humidifier": {
+        "state_attributes": {
+          "mode": {
+            "state": {
+              "drying_filter": "mdi:water-remove",
+              "high": "mdi:water-plus",
+              "low": "mdi:water-outline",
+              "medium": "mdi:water",
+              "quiet": "mdi:volume-off",
+              "target_humidity": "mdi:target"
             }
           }
         }
@@ -34,6 +69,11 @@
           "10": "mdi:brightness-7"
         }
       }
+    }
+  },
+  "services": {
+    "upload_art_frame_image": {
+      "service": "mdi:cloud-upload-outline"
     }
   }
 }

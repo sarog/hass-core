@@ -2,14 +2,16 @@
 
 from collections.abc import Mapping
 import logging
-from typing import Any
+from typing import Any, override
 
+from genie_partner_sdk.client import AladdinConnectClient
 import jwt
 import voluptuous as vol
 
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlowResult
-from homeassistant.helpers import config_entry_oauth2_flow
+from homeassistant.helpers import aiohttp_client, config_entry_oauth2_flow
 
+from .api import AsyncConfigFlowAuth
 from .const import CONFIG_FLOW_MINOR_VERSION, CONFIG_FLOW_VERSION, DOMAIN
 
 
@@ -21,6 +23,18 @@ class OAuth2FlowHandler(
     DOMAIN = DOMAIN
     VERSION = CONFIG_FLOW_VERSION
     MINOR_VERSION = CONFIG_FLOW_MINOR_VERSION
+
+    @override
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Check we have the cloud integration set up."""
+        if "cloud" not in self.hass.config.components:
+            return self.async_abort(
+                reason="cloud_not_enabled",
+                description_placeholders={"default_config": "default_config"},
+            )
+        return await super().async_step_user(user_input)
 
     async def async_step_reauth(
         self, user_input: Mapping[str, Any]
@@ -39,13 +53,28 @@ class OAuth2FlowHandler(
             )
         return await self.async_step_user()
 
+    @override
     async def async_oauth_create_entry(self, data: dict) -> ConfigFlowResult:
         """Create an oauth config entry or update existing entry for reauth."""
-        # Extract the user ID from the JWT token's 'sub' field
-        token = jwt.decode(
-            data["token"]["access_token"], options={"verify_signature": False}
+        try:
+            token = jwt.decode(
+                data["token"]["access_token"], options={"verify_signature": False}
+            )
+            user_id = token["sub"]
+        except jwt.DecodeError, KeyError:
+            return self.async_abort(reason="oauth_error")
+
+        client = AladdinConnectClient(
+            AsyncConfigFlowAuth(
+                aiohttp_client.async_get_clientsession(self.hass),
+                data["token"]["access_token"],
+            )
         )
-        user_id = token["sub"]
+        try:
+            await client.get_doors()
+        except Exception:  # noqa: BLE001
+            return self.async_abort(reason="cannot_connect")
+
         await self.async_set_unique_id(user_id)
 
         if self.source == SOURCE_REAUTH:
@@ -58,6 +87,7 @@ class OAuth2FlowHandler(
         return self.async_create_entry(title="Aladdin Connect", data=data)
 
     @property
+    @override
     def logger(self) -> logging.Logger:
         """Return logger."""
         return logging.getLogger(__name__)

@@ -1,14 +1,13 @@
 """Support for Modbus lights."""
 
-from __future__ import annotations
-
-from typing import Any
+from typing import Any, override
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
     ColorMode,
     LightEntity,
+    LightEntityStateAttribute,
 )
 from homeassistant.const import CONF_LIGHTS, CONF_NAME
 from homeassistant.core import HomeAssistant
@@ -30,7 +29,7 @@ from .const import (
     LIGHT_MODBUS_SCALE_MAX,
     LIGHT_MODBUS_SCALE_MIN,
 )
-from .entity import BaseSwitch
+from .entity import ModbusToggleEntity
 from .modbus import ModbusHub
 
 PARALLEL_UPDATES = 1
@@ -49,7 +48,7 @@ async def async_setup_platform(
     async_add_entities(ModbusLight(hass, hub, config) for config in lights)
 
 
-class ModbusLight(BaseSwitch, LightEntity):
+class ModbusLight(ModbusToggleEntity, LightEntity):
     """Class representing a Modbus light."""
 
     def __init__(
@@ -74,16 +73,23 @@ class ModbusLight(BaseSwitch, LightEntity):
                 CONF_MAX_TEMP, LIGHT_DEFAULT_MAX_KELVIN
             )
 
+    @override
     async def async_added_to_hass(self) -> None:
         """Handle entity which will be added."""
         await super().async_added_to_hass()
         if (state := await self.async_get_last_state()) is None:
             return
 
-        if (brightness := state.attributes.get(ATTR_BRIGHTNESS)) is not None:
+        if (
+            brightness := state.attributes.get(LightEntityStateAttribute.BRIGHTNESS)
+        ) is not None:
             self._attr_brightness = brightness
 
-        if (color_temp := state.attributes.get(ATTR_COLOR_TEMP_KELVIN)) is not None:
+        if (
+            color_temp := state.attributes.get(
+                LightEntityStateAttribute.COLOR_TEMP_KELVIN
+            )
+        ) is not None:
             self._attr_color_temp_kelvin = color_temp
 
     @staticmethod
@@ -95,6 +101,7 @@ class ModbusLight(BaseSwitch, LightEntity):
             return ColorMode.BRIGHTNESS
         return ColorMode.ONOFF
 
+    @override
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn light on and set brightness if provided."""
         brightness = kwargs.get(ATTR_BRIGHTNESS)
@@ -105,6 +112,7 @@ class ModbusLight(BaseSwitch, LightEntity):
             await self.async_set_color_temp(color_temp)
         await self.async_turn(self.command_on)
 
+    @override
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn light off."""
         await self.async_turn(self._command_off)
@@ -117,7 +125,7 @@ class ModbusLight(BaseSwitch, LightEntity):
         conv_brightness = self._convert_brightness_to_modbus(brightness)
 
         await self._hub.async_pb_call(
-            unit=self._slave,
+            unit=self._device_address,
             address=self._brightness_address,
             value=conv_brightness,
             use_call=CALL_TYPE_WRITE_REGISTER,
@@ -133,7 +141,7 @@ class ModbusLight(BaseSwitch, LightEntity):
         conv_color_temp_kelvin = self._convert_color_temp_to_modbus(color_temp_kelvin)
 
         await self._hub.async_pb_call(
-            unit=self._slave,
+            unit=self._device_address,
             address=self._color_temp_address,
             value=conv_color_temp_kelvin,
             use_call=CALL_TYPE_WRITE_REGISTER,
@@ -141,6 +149,7 @@ class ModbusLight(BaseSwitch, LightEntity):
         if not self._verify_active:
             self._attr_color_temp_kelvin = color_temp_kelvin
 
+    @override
     async def _async_update(self) -> None:
         """Update the entity state, including brightness and color temperature."""
         await super()._async_update()
@@ -150,7 +159,7 @@ class ModbusLight(BaseSwitch, LightEntity):
 
         if self._brightness_address:
             brightness_result = await self._hub.async_pb_call(
-                unit=self._slave,
+                unit=self._device_address,
                 value=1,
                 address=self._brightness_address,
                 use_call=CALL_TYPE_REGISTER_HOLDING,
@@ -167,7 +176,7 @@ class ModbusLight(BaseSwitch, LightEntity):
 
         if self._color_temp_address:
             color_result = await self._hub.async_pb_call(
-                unit=self._slave,
+                unit=self._device_address,
                 value=1,
                 address=self._color_temp_address,
                 use_call=CALL_TYPE_REGISTER_HOLDING,
@@ -193,7 +202,7 @@ class ModbusLight(BaseSwitch, LightEntity):
         )
 
     def _convert_modbus_percent_to_temperature(self, percent: int) -> int:
-        """Convert Modbus scale (0-100) to the color temperature in Kelvin (2000-7000 К)."""
+        """Convert Modbus scale (0-100) to color temp in Kelvin (2000-7000 K)."""
         return round(
             self._attr_min_color_temp_kelvin
             + (

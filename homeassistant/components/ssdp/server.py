@@ -1,13 +1,12 @@
 """The SSDP integration server."""
 
-from __future__ import annotations
-
 import asyncio
 from contextlib import ExitStack
+from ipaddress import IPv6Address
 import logging
 import socket
 from time import time
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin
 import xml.etree.ElementTree as ET
 
@@ -30,9 +29,6 @@ from homeassistant.helpers.network import NoURLAvailableError, get_url
 from homeassistant.helpers.system_info import async_get_system_info
 
 from .common import async_build_source_set
-
-UPNP_SERVER_MIN_PORT = 40000
-UPNP_SERVER_MAX_PORT = 40100
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -95,26 +91,17 @@ async def _async_find_next_available_port(
 ) -> tuple[int, socket.socket]:
     """Get a free TCP port."""
     family = socket.AF_INET if is_ipv4_address(source) else socket.AF_INET6
-    # We use an ExitStack to ensure the socket is closed if we fail to find a port.
-    with ExitStack() as stack:
-        test_socket = stack.enter_context(socket.socket(family, socket.SOCK_STREAM))
+    test_socket = socket.socket(family, socket.SOCK_STREAM)
+    try:
         test_socket.setblocking(False)
-        test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        for port in range(UPNP_SERVER_MIN_PORT, UPNP_SERVER_MAX_PORT):
-            addr = (source[0], port, *source[2:])
-            try:
-                test_socket.bind(addr)
-            except OSError:
-                if port == UPNP_SERVER_MAX_PORT - 1:
-                    raise
-            else:
-                # The socket will be dealt by the caller, so we detach it from the stack
-                # before returning it to prevent it from being closed.
-                stack.pop_all()
-                return port, test_socket
-
-    raise RuntimeError("unreachable")
+        addr = (source[0], 0, *source[2:])
+        test_socket.bind(addr)
+        port = test_socket.getsockname()[1]
+    except BaseException:
+        test_socket.close()
+        raise
+    return port, test_socket
 
 
 class Server:
@@ -137,7 +124,11 @@ class Server:
     async def _async_get_instance_udn(self) -> str:
         """Get Unique Device Name for this instance."""
         instance_id = await async_get_instance_id(self.hass)
-        return f"uuid:{instance_id[0:8]}-{instance_id[8:12]}-{instance_id[12:16]}-{instance_id[16:20]}-{instance_id[20:32]}".upper()
+        return (
+            f"uuid:{instance_id[0:8]}-{instance_id[8:12]}"
+            f"-{instance_id[12:16]}-{instance_id[16:20]}"
+            f"-{instance_id[20:32]}"
+        ).upper()
 
     async def _async_start_upnp_servers(self, event: Event) -> None:
         """Start the UPnP/SSDP servers."""
@@ -183,6 +174,7 @@ class Server:
             for source_ip in await async_build_source_set(self.hass):
                 source_ip_str = str(source_ip)
                 if source_ip.version == 6:
+                    source_ip = cast(IPv6Address, source_ip)
                     assert source_ip.scope_id is not None
                     source_tuple: AddressTupleVXType = (
                         source_ip_str,

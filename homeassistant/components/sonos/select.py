@@ -1,9 +1,8 @@
 """Select entities for Sonos."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 import logging
+from typing import override
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.core import HomeAssistant
@@ -59,17 +58,12 @@ async def async_setup_entry(
         for select_data in SELECT_TYPES:
             if select_data.speaker_model == speaker.model_name.upper():
                 if (
-                    state := getattr(speaker.soco, select_data.soco_attribute, None)
-                ) is not None:
-                    try:
-                        setattr(speaker, select_data.speaker_attribute, int(state))
-                        features.append(select_data)
-                    except ValueError:
-                        _LOGGER.error(
-                            "Invalid value for %s %s",
-                            select_data.speaker_attribute,
-                            state,
-                        )
+                    speaker.update_soco_int_attribute(
+                        select_data.soco_attribute, select_data.speaker_attribute
+                    )
+                    is not None
+                ):
+                    features.append(select_data)
         return features
 
     async def _async_create_entities(speaker: SonosSpeaker) -> None:
@@ -104,6 +98,7 @@ class SonosSelectEntity(SonosEntity, SelectEntity):
         self.speaker_attribute = select_data.speaker_attribute
         self.soco_attribute = select_data.soco_attribute
 
+    @override
     async def _async_fallback_poll(self) -> None:
         """Poll the value if subscriptions are not working."""
         await self.hass.async_add_executor_job(self.poll_state)
@@ -112,10 +107,12 @@ class SonosSelectEntity(SonosEntity, SelectEntity):
     @soco_error()
     def poll_state(self) -> None:
         """Poll the device for the current state."""
-        state = getattr(self.soco, self.soco_attribute)
-        setattr(self.speaker, self.speaker_attribute, state)
+        self.speaker.update_soco_int_attribute(
+            self.soco_attribute, self.speaker_attribute
+        )
 
     @property
+    @override
     def current_option(self) -> str | None:
         """Return the current option for the entity."""
         option = getattr(self.speaker, self.speaker_attribute, None)
@@ -130,6 +127,7 @@ class SonosSelectEntity(SonosEntity, SelectEntity):
         return self._attr_options[option]
 
     @soco_error()
+    @override
     def select_option(self, option: str) -> None:
         """Set a new value."""
         dialog_level = self._attr_options.index(option)

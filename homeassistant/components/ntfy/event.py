@@ -1,10 +1,8 @@
 """Event platform for ntfy integration."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 from aiontfy import Event, Notification
 from aiontfy.exceptions import (
@@ -17,9 +15,17 @@ from aiontfy.exceptions import (
 from homeassistant.components.event import EventEntity, EventEntityDescription
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import CONF_MESSAGE, CONF_PRIORITY, CONF_TAGS, CONF_TITLE
+from .const import (
+    CONF_MESSAGE,
+    CONF_PRIORITY,
+    CONF_TAGS,
+    CONF_TITLE,
+    CONF_TOPIC,
+    DOMAIN,
+)
 from .coordinator import NtfyConfigEntry
 from .entity import NtfyBaseEntity
 
@@ -76,6 +82,7 @@ class NtfyEventEntity(NtfyBaseEntity, EventEntity):
             self._trigger_event(event, notification.to_dict())
             self.async_write_ha_state()
 
+    @override
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added to hass."""
 
@@ -98,13 +105,27 @@ class NtfyEventEntity(NtfyBaseEntity, EventEntity):
                 return
             except NtfyForbiddenError:
                 if self._attr_available:
-                    _LOGGER.error("Failed to subscribe to topic. Topic is protected")
+                    _LOGGER.error(
+                        "Failed to subscribe to topic %s. Topic is protected",
+                        self.topic,
+                    )
                 self._attr_available = False
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    f"topic_protected_{self.topic}",
+                    is_fixable=True,
+                    severity=ir.IssueSeverity.ERROR,
+                    translation_key="topic_protected",
+                    translation_placeholders={CONF_TOPIC: self.topic},
+                    data={"entity_id": self.entity_id, "topic": self.topic},
+                )
                 return
             except NtfyHTTPError as e:
                 if self._attr_available:
                     _LOGGER.error(
-                        "Failed to connect to ntfy service due to a server error: %s (%s)",
+                        "Failed to connect to ntfy service"
+                        " due to a server error: %s (%s)",
                         e.error,
                         e.link,
                     )
@@ -124,27 +145,29 @@ class NtfyEventEntity(NtfyBaseEntity, EventEntity):
             except Exception:
                 if self._attr_available:
                     _LOGGER.exception(
-                        "Failed to connect to ntfy service due to an unexpected exception"
+                        "Failed to connect to ntfy service"
+                        " due to an unexpected exception"
                     )
                 self._attr_available = False
             finally:
-                if self._ws is None or self._ws.done():
-                    self._ws = self.config_entry.async_create_background_task(
-                        self.hass,
-                        target=self.ntfy.subscribe(
-                            topics=[self.topic],
-                            callback=self._async_handle_event,
-                            title=self.subentry.data.get(CONF_TITLE),
-                            message=self.subentry.data.get(CONF_MESSAGE),
-                            priority=self.subentry.data.get(CONF_PRIORITY),
-                            tags=self.subentry.data.get(CONF_TAGS),
-                        ),
-                        name="ntfy_websocket",
-                    )
                 self.async_write_ha_state()
+            if self._ws is None or self._ws.done():
+                self._ws = self.config_entry.async_create_background_task(
+                    self.hass,
+                    target=self.ntfy.subscribe(
+                        topics=[self.topic],
+                        callback=self._async_handle_event,
+                        title=self.subentry.data.get(CONF_TITLE),
+                        message=self.subentry.data.get(CONF_MESSAGE),
+                        priority=self.subentry.data.get(CONF_PRIORITY),
+                        tags=self.subentry.data.get(CONF_TAGS),
+                    ),
+                    name="ntfy_websocket",
+                )
             await asyncio.sleep(RECONNECT_INTERVAL)
 
     @property
+    @override
     def entity_picture(self) -> str | None:
         """Return the entity picture to use in the frontend, if any."""
 

@@ -1,7 +1,5 @@
 """Runtime entry data for ESPHome stored in hass.data."""
 
-from __future__ import annotations
-
 import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Iterable
@@ -29,11 +27,13 @@ from aioesphomeapi import (
     Event,
     EventInfo,
     FanInfo,
+    InfraredInfo,
     LightInfo,
     LockInfo,
     MediaPlayerInfo,
     MediaPlayerSupportedFormat,
     NumberInfo,
+    RadioFrequencyInfo,
     SelectInfo,
     SensorInfo,
     SensorState,
@@ -44,19 +44,22 @@ from aioesphomeapi import (
     UpdateInfo,
     UserService,
     ValveInfo,
-    build_unique_id,
+    WaterHeaterInfo,
+    build_device_unique_id,
 )
 from aioesphomeapi.model import ButtonInfo
 from bleak_esphome.backend.device import ESPHomeBluetoothDevice
 
+from homeassistant import config_entries
 from homeassistant.components.assist_satellite import AssistSatelliteConfiguration
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import discovery_flow, entity_registry as er
+from homeassistant.helpers.service_info.esphome import ESPHomeServiceInfo
 from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN
+from .const import CONF_NOISE_PSK, DOMAIN
 from .dashboard import async_get_dashboard
 
 type ESPHomeConfigEntry = ConfigEntry[RuntimeEntryData]
@@ -82,7 +85,9 @@ INFO_TYPE_TO_PLATFORM: dict[type[EntityInfo], Platform] = {
     DateTimeInfo: Platform.DATETIME,
     EventInfo: Platform.EVENT,
     FanInfo: Platform.FAN,
+    InfraredInfo: Platform.INFRARED,
     LightInfo: Platform.LIGHT,
+    RadioFrequencyInfo: Platform.RADIO_FREQUENCY,
     LockInfo: Platform.LOCK,
     MediaPlayerInfo: Platform.MEDIA_PLAYER,
     NumberInfo: Platform.NUMBER,
@@ -94,23 +99,8 @@ INFO_TYPE_TO_PLATFORM: dict[type[EntityInfo], Platform] = {
     TimeInfo: Platform.TIME,
     UpdateInfo: Platform.UPDATE,
     ValveInfo: Platform.VALVE,
+    WaterHeaterInfo: Platform.WATER_HEATER,
 }
-
-
-def build_device_unique_id(mac: str, entity_info: EntityInfo) -> str:
-    """Build unique ID for entity, appending @device_id if it belongs to a sub-device.
-
-    This wrapper around build_unique_id ensures that entities belonging to sub-devices
-    have their device_id appended to the unique_id to handle proper migration when
-    entities move between devices.
-    """
-    base_unique_id = build_unique_id(mac, entity_info)
-
-    # If entity belongs to a sub-device, append @device_id
-    if entity_info.device_id:
-        return f"{base_unique_id}@{entity_info.device_id}"
-
-    return base_unique_id
 
 
 class StoreData(TypedDict, total=False):
@@ -160,6 +150,8 @@ class RuntimeEntryData:
     )
     loaded_platforms: set[Platform] = field(default_factory=set)
     platform_load_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Set once the first connection has finished scanner setup or teardown.
+    first_connect_done: asyncio.Event = field(default_factory=asyncio.Event)
     _storage_contents: StoreData | None = None
     _pending_storage: Callable[[], StoreData] | None = None
     assist_pipeline_update_callbacks: list[CALLBACK_TYPE] = field(default_factory=list)
@@ -177,9 +169,10 @@ class RuntimeEntryData:
     assist_satellite_config_update_callbacks: list[
         Callable[[AssistSatelliteConfiguration], None]
     ] = field(default_factory=list)
-    assist_satellite_set_wake_word_callbacks: list[Callable[[str], None]] = field(
-        default_factory=list
+    assist_satellite_set_wake_words_callbacks: list[Callable[[list[str]], None]] = (
+        field(default_factory=list)
     )
+    assist_satellite_wake_words: dict[int, str] = field(default_factory=dict)
     device_id_to_name: dict[int, str] = field(default_factory=dict)
     entity_removal_callbacks: dict[EntityInfoKey, list[CALLBACK_TYPE]] = field(
         default_factory=dict
@@ -205,7 +198,7 @@ class RuntimeEntryData:
         entity_info_type: type[EntityInfo],
         callback_: Callable[[list[EntityInfo]], None],
     ) -> CALLBACK_TYPE:
-        """Register to receive callbacks when static info changes for an EntityInfo type."""
+        """Register to receive callbacks when static info changes."""
         callbacks = self.entity_info_callbacks.setdefault(entity_info_type, [])
         callbacks.append(callback_)
         return partial(callbacks.remove, callback_)
@@ -216,7 +209,7 @@ class RuntimeEntryData:
         static_info: EntityInfo,
         callback_: Callable[[EntityInfo], None],
     ) -> CALLBACK_TYPE:
-        """Register to receive callbacks when static info is updated for a specific key."""
+        """Register callbacks when static info is updated for a specific key."""
         callback_key = (type(static_info), static_info.device_id, static_info.key)
         callbacks = self.entity_info_key_updated_callbacks.setdefault(callback_key, [])
         callbacks.append(callback_)
@@ -295,16 +288,43 @@ class RuntimeEntryData:
                 needed_platforms.add(Platform.BINARY_SENSOR)
                 needed_platforms.add(Platform.SELECT)
 
-        needed_platforms.update(INFO_TYPE_TO_PLATFORM[type(info)] for info in infos)
-        await self._ensure_platforms_loaded(hass, entry, needed_platforms)
-
         # Make a dict of the EntityInfo by type and send
         # them to the listeners for each specific EntityInfo type
+        info_types_to_platform = INFO_TYPE_TO_PLATFORM
         infos_by_type: defaultdict[type[EntityInfo], list[EntityInfo]] = defaultdict(
             list
         )
+        ent_reg = er.async_get(hass)
+        registry_get_entity = ent_reg.async_get_entity_id
         for info in infos:
-            infos_by_type[type(info)].append(info)
+            info_type = type(info)
+            if platform := info_types_to_platform.get(info_type):
+                needed_platforms.add(platform)
+                infos_by_type[info_type].append(info)
+                # Migrate legacy unique ids to the version 3 format that fixes
+                # UTF-8 collisions. Skip when a version 3 id already exists so a
+                # downgrade then upgrade keeps the original entity. When two
+                # legacy ids collided (the bug this fixes) only one registry
+                # entry exists for it, so the first iterated info claims it and
+                # the rest get fresh version 3 ids.
+                old_unique_id = build_device_unique_id(mac, info, version=1)
+                new_unique_id = build_device_unique_id(mac, info, version=3)
+                if (
+                    old_unique_id != new_unique_id
+                    and (
+                        old_entry := registry_get_entity(
+                            platform, DOMAIN, old_unique_id
+                        )
+                    )
+                    and not registry_get_entity(platform, DOMAIN, new_unique_id)
+                ):
+                    ent_reg.async_update_entity(old_entry, new_unique_id=new_unique_id)
+            else:
+                _LOGGER.warning(
+                    "Entity type %s is not supported in this version of Home Assistant",
+                    info_type,
+                )
+        await self._ensure_platforms_loaded(hass, entry, needed_platforms)
 
         for type_, callbacks in self.entity_info_callbacks.items():
             # If all entities for a type are removed, we
@@ -439,14 +459,6 @@ class RuntimeEntryData:
             # save delay has passed.
             await self.store.async_save(self._pending_storage())
 
-    async def async_update_listener(
-        self, hass: HomeAssistant, entry: ESPHomeConfigEntry
-    ) -> None:
-        """Handle options update."""
-        if self.original_options == entry.options:
-            return
-        hass.async_create_task(hass.config_entries.async_reload(entry.entry_id))
-
     @callback
     def async_on_disconnect(self) -> None:
         """Call when the entry has been disconnected.
@@ -467,7 +479,7 @@ class RuntimeEntryData:
 
     @callback
     def async_on_connect(
-        self, device_info: DeviceInfo, api_version: APIVersion
+        self, hass: HomeAssistant, device_info: DeviceInfo, api_version: APIVersion
     ) -> None:
         """Call when the entry has been connected."""
         self.available = True
@@ -483,12 +495,54 @@ class RuntimeEntryData:
         # be marked as unavailable or not.
         self.expected_disconnect = True
 
+        if not device_info.zwave_proxy_feature_flags:
+            return
+
+        assert self.client.connected_address
+
+        # If the device does not have a zwave_home_id, it means
+        # either the Z-Wave controller has never been connected
+        # to the ESPHome device, or the Z-Wave controller has
+        # never been provisioned with a home ID (brand new).
+        # Since we cannot tell the difference, and it could
+        # just be the cable is unplugged we only
+        # automatically start the flow if we have a home ID.
+        if not device_info.zwave_home_id:
+            return
+
+        self.async_create_zwave_js_flow(hass, device_info, device_info.zwave_home_id)
+
+    def async_create_zwave_js_flow(
+        self, hass: HomeAssistant, device_info: DeviceInfo, zwave_home_id: int
+    ) -> None:
+        """Create a zwave_js config flow for a Z-Wave JS Proxy device."""
+        assert self.client.connected_address is not None
+        entry = hass.config_entries.async_get_entry(self.entry_id)
+        noise_psk = entry.data.get(CONF_NOISE_PSK) if entry else None
+        discovery_flow.async_create_flow(
+            hass,
+            "zwave_js",
+            {"source": config_entries.SOURCE_ESPHOME},
+            ESPHomeServiceInfo(
+                name=device_info.name,
+                zwave_home_id=zwave_home_id,
+                ip_address=self.client.connected_address,
+                port=self.client.port,
+                noise_psk=noise_psk or None,
+            ),
+            discovery_key=discovery_flow.DiscoveryKey(
+                domain=DOMAIN,
+                key=device_info.mac_address,
+                version=1,
+            ),
+        )
+
     @callback
     def async_register_assist_satellite_config_updated_callback(
         self,
         callback_: Callable[[AssistSatelliteConfiguration], None],
     ) -> CALLBACK_TYPE:
-        """Register to receive callbacks when the Assist satellite's configuration is updated."""
+        """Register callbacks when the Assist satellite's configuration is updated."""
         self.assist_satellite_config_update_callbacks.append(callback_)
         return partial(self.assist_satellite_config_update_callbacks.remove, callback_)
 
@@ -501,19 +555,28 @@ class RuntimeEntryData:
             callback_(config)
 
     @callback
-    def async_register_assist_satellite_set_wake_word_callback(
+    def async_register_assist_satellite_set_wake_words_callback(
         self,
-        callback_: Callable[[str], None],
+        callback_: Callable[[list[str]], None],
     ) -> CALLBACK_TYPE:
-        """Register to receive callbacks when the Assist satellite's wake word is set."""
-        self.assist_satellite_set_wake_word_callbacks.append(callback_)
-        return partial(self.assist_satellite_set_wake_word_callbacks.remove, callback_)
+        """Register callbacks when the Assist satellite's wake word is set."""
+        self.assist_satellite_set_wake_words_callbacks.append(callback_)
+        return partial(self.assist_satellite_set_wake_words_callbacks.remove, callback_)
 
     @callback
-    def async_assist_satellite_set_wake_word(self, wake_word_id: str) -> None:
-        """Notify listeners that the Assist satellite wake word has been set."""
-        for callback_ in self.assist_satellite_set_wake_word_callbacks.copy():
-            callback_(wake_word_id)
+    def async_assist_satellite_set_wake_word(
+        self, wake_word_index: int, wake_word_id: str | None
+    ) -> None:
+        """Notify listeners that the Assist satellite wake words have been set."""
+        if wake_word_id:
+            self.assist_satellite_wake_words[wake_word_index] = wake_word_id
+        else:
+            self.assist_satellite_wake_words.pop(wake_word_index, None)
+
+        wake_word_ids = list(self.assist_satellite_wake_words.values())
+
+        for callback_ in self.assist_satellite_set_wake_words_callbacks.copy():
+            callback_(wake_word_ids)
 
     @callback
     def async_register_entity_removal_callback(

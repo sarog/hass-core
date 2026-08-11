@@ -1,13 +1,11 @@
 """Base implementation for all modbus platforms."""
 
-from __future__ import annotations
-
 from abc import abstractmethod
 from collections.abc import Callable
 import copy
 from datetime import datetime, timedelta
 import struct
-from typing import Any, cast
+from typing import Any, cast, override
 
 from homeassistant.const import (
     CONF_ADDRESS,
@@ -17,7 +15,6 @@ from homeassistant.const import (
     CONF_DELAY,
     CONF_DEVICE_CLASS,
     CONF_NAME,
-    CONF_OFFSET,
     CONF_SCAN_INTERVAL,
     CONF_SLAVE,
     CONF_STRUCTURE,
@@ -32,7 +29,6 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
-    _LOGGER,
     CALL_TYPE_COIL,
     CALL_TYPE_DISCRETE,
     CALL_TYPE_REGISTER_HOLDING,
@@ -50,7 +46,6 @@ from .const import (
     CONF_MIN_VALUE,
     CONF_NAN_VALUE,
     CONF_PRECISION,
-    CONF_SCALE,
     CONF_SLAVE_COUNT,
     CONF_STATE_OFF,
     CONF_STATE_ON,
@@ -62,13 +57,16 @@ from .const import (
     CONF_VIRTUAL_COUNT,
     CONF_WRITE_TYPE,
     CONF_ZERO_SUPPRESS,
+    DEFAULT_OFFSET,
+    DEFAULT_SCALE,
+    LOGGER,
     SIGNAL_STOP_ENTITY,
     DataType,
 )
 from .modbus import ModbusHub
 
 
-class BasePlatform(Entity):
+class ModbusBaseEntity(Entity):
     """Base for readonly platforms."""
 
     _value: str | None = None
@@ -83,9 +81,9 @@ class BasePlatform(Entity):
 
         self._hub = hub
         if (conf_slave := entry.get(CONF_SLAVE)) is not None:
-            self._slave = conf_slave
+            self._device_address = conf_slave
         else:
-            self._slave = entry.get(CONF_DEVICE_ADDRESS, 1)
+            self._device_address = entry.get(CONF_DEVICE_ADDRESS, 1)
         self._address = int(entry[CONF_ADDRESS])
         self._input_type = entry[CONF_INPUT_TYPE]
         self._scan_interval = int(entry[CONF_SCAN_INTERVAL])
@@ -122,6 +120,7 @@ class BasePlatform(Entity):
                 self.async_local_update,
             )
 
+    @override
     async def async_will_remove_from_hass(self) -> None:
         """Remove entity from hass."""
         self.async_disable()
@@ -129,7 +128,7 @@ class BasePlatform(Entity):
     @callback
     def async_disable(self) -> None:
         """Remote stop entity."""
-        _LOGGER.info(f"hold entity {self._attr_name}")
+        LOGGER.info(f"hold entity {self._attr_name}")
         if self._cancel_call:
             self._cancel_call()
             self._cancel_call = None
@@ -154,7 +153,7 @@ class BasePlatform(Entity):
         )
 
 
-class BaseStructPlatform(BasePlatform, RestoreEntity):
+class ModbusStructEntity(ModbusBaseEntity, RestoreEntity):
     """Base class representing a sensor/climate."""
 
     def __init__(self, hass: HomeAssistant, hub: ModbusHub, config: dict) -> None:
@@ -163,8 +162,6 @@ class BaseStructPlatform(BasePlatform, RestoreEntity):
         self._swap = config[CONF_SWAP]
         self._data_type = config[CONF_DATA_TYPE]
         self._structure: str = config[CONF_STRUCTURE]
-        self._scale = config[CONF_SCALE]
-        self._offset = config[CONF_OFFSET]
         self._slave_count = config.get(CONF_SLAVE_COUNT) or config.get(
             CONF_VIRTUAL_COUNT, 0
         )
@@ -181,8 +178,6 @@ class BaseStructPlatform(BasePlatform, RestoreEntity):
             self._precision = config.get(CONF_PRECISION, 2)
         else:
             self._precision = config.get(CONF_PRECISION, 0)
-            if self._precision > 0 or self._scale != int(self._scale):
-                self._value_is_int = False
 
     def _swap_registers(self, registers: list[int], slave_count: int) -> list[int]:
         """Do swap as needed."""
@@ -206,16 +201,21 @@ class BaseStructPlatform(BasePlatform, RestoreEntity):
             registers.reverse()
         return registers
 
-    def __process_raw_value(self, entry: float | str | bytes) -> str | None:
+    def __process_raw_value(
+        self,
+        entry: float | bytes,
+        scale: float = DEFAULT_SCALE,
+        offset: float = DEFAULT_OFFSET,
+    ) -> str | None:
         """Process value from sensor with NaN handling, scaling, offset, min/max etc."""
-        if self._nan_value and entry in (self._nan_value, -self._nan_value):
+        if self._nan_value is not None and entry in (self._nan_value, -self._nan_value):
             return None
         if isinstance(entry, bytes):
             return entry.decode()
         if entry != entry:  # noqa: PLR0124
             # NaN float detection replace with None
             return None
-        val: float | int = self._scale * entry + self._offset
+        val: float | int = scale * entry + offset
         if self._min_value is not None and val < self._min_value:
             val = self._min_value
         if self._max_value is not None and val > self._max_value:
@@ -226,7 +226,12 @@ class BaseStructPlatform(BasePlatform, RestoreEntity):
             return str(round(val))
         return f"{float(val):.{self._precision}f}"
 
-    def unpack_structure_result(self, registers: list[int]) -> str | None:
+    def unpack_structure_result(
+        self,
+        registers: list[int],
+        scale: float = DEFAULT_SCALE,
+        offset: float = DEFAULT_OFFSET,
+    ) -> str | None:
         """Convert registers to proper result."""
 
         if self._swap:
@@ -244,13 +249,13 @@ class BaseStructPlatform(BasePlatform, RestoreEntity):
         except struct.error as err:
             recv_size = len(registers) * 2
             msg = f"Received {recv_size} bytes, unpack error {err}"
-            _LOGGER.error(msg)
+            LOGGER.error(msg)
             return None
         if len(val) > 1:
             # Apply scale, precision, limits to floats and ints
             v_result = []
             for entry in val:
-                v_temp = self.__process_raw_value(entry)
+                v_temp = self.__process_raw_value(entry, scale, offset)
                 if self._data_type != DataType.CUSTOM:
                     v_result.append(str(v_temp))
                 else:
@@ -258,10 +263,10 @@ class BaseStructPlatform(BasePlatform, RestoreEntity):
             return ",".join(map(str, v_result))
 
         # Apply scale, precision, limits to floats and ints
-        return self.__process_raw_value(val[0])
+        return self.__process_raw_value(val[0], scale, offset)
 
 
-class BaseSwitch(BasePlatform, ToggleEntity, RestoreEntity):
+class ModbusToggleEntity(ModbusBaseEntity, ToggleEntity, RestoreEntity):
     """Base class representing a Modbus switch."""
 
     def __init__(self, hass: HomeAssistant, hub: ModbusHub, config: dict) -> None:
@@ -310,6 +315,7 @@ class BaseSwitch(BasePlatform, ToggleEntity, RestoreEntity):
         else:
             self._verify_active = False
 
+    @override
     async def async_added_to_hass(self) -> None:
         """Handle entity which will be added."""
         await self.async_base_added_to_hass()
@@ -323,7 +329,7 @@ class BaseSwitch(BasePlatform, ToggleEntity, RestoreEntity):
     async def async_turn(self, command: int) -> None:
         """Evaluate switch result."""
         result = await self._hub.async_pb_call(
-            self._slave, self._address, command, self._write_type
+            self._device_address, self._address, command, self._write_type
         )
         if result is None:
             self._attr_available = False
@@ -346,10 +352,12 @@ class BaseSwitch(BasePlatform, ToggleEntity, RestoreEntity):
             return
         await self.async_local_update(cancel_pending_update=True)
 
+    @override
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Set switch off."""
         await self.async_turn(self._command_off)
 
+    @override
     async def _async_update(self) -> None:
         """Update the entity state."""
         if not self._verify_active:
@@ -358,7 +366,7 @@ class BaseSwitch(BasePlatform, ToggleEntity, RestoreEntity):
 
         # do not allow multiple active calls to the same platform
         result = await self._hub.async_pb_call(
-            self._slave, self._verify_address, 1, self._verify_type
+            self._device_address, self._verify_address, 1, self._verify_type
         )
         if result is None:
             self._attr_available = False
@@ -374,12 +382,12 @@ class BaseSwitch(BasePlatform, ToggleEntity, RestoreEntity):
             elif value in self._state_off:
                 self._attr_is_on = False
             elif value is not None:
-                _LOGGER.error(
+                LOGGER.error(
                     (
                         "Unexpected response from modbus device slave %s register %s,"
                         " got 0x%2x"
                     ),
-                    self._slave,
+                    self._device_address,
                     self._verify_address,
                     value,
                 )

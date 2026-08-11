@@ -1,17 +1,16 @@
 """Config flow for Husqvarna Bluetooth integration."""
 
-from __future__ import annotations
-
 from collections.abc import Mapping
 import random
-from typing import Any
+from typing import Any, override
 
 from automower_ble.mower import Mower
 from automower_ble.protocol import ResponseResult
 from bleak import BleakError
 from bleak_retry_connector import get_device
 from gardena_bluetooth.const import ScanService
-from gardena_bluetooth.parse import ManufacturerData, ProductType
+from gardena_bluetooth.parse import ProductType
+from gardena_bluetooth.scan import async_get_manufacturer_data
 import voluptuous as vol
 
 from homeassistant.components import bluetooth
@@ -21,41 +20,27 @@ from homeassistant.const import CONF_ADDRESS, CONF_CLIENT_ID, CONF_PIN
 
 from .const import DOMAIN, LOGGER
 
+BLUETOOTH_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_PIN): str,
+    }
+)
 
-def _is_supported(discovery_info: BluetoothServiceInfo):
-    """Check if device is supported."""
-    if ScanService not in discovery_info.service_uuids:
-        LOGGER.debug(
-            "Unsupported device, missing service %s: %s", ScanService, discovery_info
-        )
-        return False
+USER_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_ADDRESS): str,
+        vol.Required(CONF_PIN): str,
+    }
+)
 
-    if not (data := discovery_info.manufacturer_data.get(ManufacturerData.company)):
-        LOGGER.debug(
-            "Unsupported device, missing manufacturer data %s: %s",
-            ManufacturerData.company,
-            discovery_info,
-        )
-        return False
-
-    manufacturer_data = ManufacturerData.decode(data)
-    product_type = ProductType.from_manufacturer_data(manufacturer_data)
-
-    # Some mowers only expose the serial number in the manufacturer data
-    # and not the product type, so we allow None here as well.
-    if product_type not in (ProductType.MOWER, None):
-        LOGGER.debug("Unsupported device: %s (%s)", manufacturer_data, discovery_info)
-        return False
-
-    LOGGER.debug("Supported device: %s", manufacturer_data)
-    return True
+REAUTH_SCHEMA = BLUETOOTH_SCHEMA
 
 
 def _pin_valid(pin: str) -> bool:
     """Check if the pin is valid."""
     try:
         int(pin)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return False
     return True
 
@@ -68,16 +53,47 @@ class HusqvarnaAutomowerBleConfigFlow(ConfigFlow, domain=DOMAIN):
     address: str | None = None
     mower_name: str = ""
     pin: str | None = None
+    pairable: bool | None = None
 
+    async def _is_supported(self, discovery_info: BluetoothServiceInfo):
+        """Check if device is supported."""
+        if ScanService not in discovery_info.service_uuids:
+            LOGGER.debug(
+                "Unsupported device, missing service %s: %s",
+                ScanService,
+                discovery_info,
+            )
+            return False
+
+        manufacturer_data = (
+            await async_get_manufacturer_data({discovery_info.address})
+        )[discovery_info.address]
+
+        if manufacturer_data.product_type is not ProductType.MOWER:
+            LOGGER.debug(
+                "Unsupported device: %s (%s)", manufacturer_data, discovery_info
+            )
+            return False
+
+        self.pairable = manufacturer_data.pairable
+
+        LOGGER.debug("Supported device: %s", manufacturer_data)
+        return True
+
+    @override
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfo
     ) -> ConfigFlowResult:
         """Handle the bluetooth discovery step."""
 
         LOGGER.debug("Discovered device: %s", discovery_info)
-        if not _is_supported(discovery_info):
+        if not await self._is_supported(discovery_info):
             return self.async_abort(reason="no_devices_found")
 
+        self.context["title_placeholders"] = {
+            "name": discovery_info.name,
+            "address": discovery_info.address,
+        }
         self.address = discovery_info.address
         await self.async_set_unique_id(self.address)
         self._abort_if_unique_id_configured()
@@ -95,22 +111,25 @@ class HusqvarnaAutomowerBleConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_pin"
             else:
                 self.pin = user_input[CONF_PIN]
+                if self.pairable is False:
+                    LOGGER.warning(
+                        "The mower does not appear to be pairable. "
+                        "Ensure the mower is in pairing mode before continuing. "
+                        "If the mower isn't pairable you will receive authentication "
+                        "errors and be unable to connect"
+                    )
                 return await self.check_mower(user_input)
 
         return self.async_show_form(
             step_id="bluetooth_confirm",
             data_schema=self.add_suggested_values_to_schema(
-                vol.Schema(
-                    {
-                        vol.Required(CONF_PIN): str,
-                    },
-                ),
-                user_input,
+                BLUETOOTH_SCHEMA, user_input
             ),
             description_placeholders={"name": self.mower_name or self.address},
             errors=errors,
         )
 
+    @override
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -129,15 +148,7 @@ class HusqvarnaAutomowerBleConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-            data_schema=self.add_suggested_values_to_schema(
-                vol.Schema(
-                    {
-                        vol.Required(CONF_ADDRESS): str,
-                        vol.Required(CONF_PIN): str,
-                    },
-                ),
-                user_input,
-            ),
+            data_schema=self.add_suggested_values_to_schema(USER_SCHEMA, user_input),
             errors=errors,
         )
 
@@ -146,6 +157,10 @@ class HusqvarnaAutomowerBleConfigFlow(ConfigFlow, domain=DOMAIN):
         channel_id = random.randint(1, 0xFFFFFFFF)
 
         assert self.address
+
+        if device is None:
+            LOGGER.debug("Could not find device with address '%s'", self.address)
+            return None
 
         try:
             (manufacturer, device_type, _model) = await Mower(
@@ -184,7 +199,24 @@ class HusqvarnaAutomowerBleConfigFlow(ConfigFlow, domain=DOMAIN):
 
         title = await self.probe_mower(device)
         if title is None:
-            return self.async_abort(reason="cannot_connect")
+            if self.source == SOURCE_BLUETOOTH:
+                return self.async_show_form(
+                    step_id="bluetooth_confirm",
+                    data_schema=BLUETOOTH_SCHEMA,
+                    description_placeholders={"name": self.address},
+                    errors={"base": "cannot_connect"},
+                )
+            return self.async_show_form(
+                step_id="user",
+                data_schema=self.add_suggested_values_to_schema(
+                    USER_SCHEMA,
+                    {
+                        CONF_ADDRESS: self.address,
+                        CONF_PIN: self.pin,
+                    },
+                ),
+                errors={"base": "cannot_connect"},
+            )
         self.mower_name = title
 
         try:
@@ -209,11 +241,7 @@ class HusqvarnaAutomowerBleConfigFlow(ConfigFlow, domain=DOMAIN):
                 if self.source == SOURCE_BLUETOOTH:
                     return self.async_show_form(
                         step_id="bluetooth_confirm",
-                        data_schema=vol.Schema(
-                            {
-                                vol.Required(CONF_PIN): str,
-                            },
-                        ),
+                        data_schema=BLUETOOTH_SCHEMA,
                         description_placeholders={
                             "name": self.mower_name or self.address
                         },
@@ -230,17 +258,11 @@ class HusqvarnaAutomowerBleConfigFlow(ConfigFlow, domain=DOMAIN):
                 return self.async_show_form(
                     step_id="user",
                     data_schema=self.add_suggested_values_to_schema(
-                        vol.Schema(
-                            {
-                                vol.Required(CONF_ADDRESS): str,
-                                vol.Required(CONF_PIN): str,
-                            },
-                        ),
-                        suggested_values,
+                        USER_SCHEMA, suggested_values
                     ),
                     errors=errors,
                 )
-        except (TimeoutError, BleakError):
+        except TimeoutError, BleakError:
             return self.async_abort(reason="cannot_connect")
 
         return self.async_create_entry(
@@ -304,7 +326,7 @@ class HusqvarnaAutomowerBleConfigFlow(ConfigFlow, domain=DOMAIN):
                         data=reauth_entry.data | {CONF_PIN: self.pin},
                     )
 
-            except (TimeoutError, BleakError):
+            except TimeoutError, BleakError:
                 # We don't want to abort a reauth flow when we can't connect, so
                 # we just show the form again with an error.
                 errors["base"] = "cannot_connect"
@@ -312,12 +334,7 @@ class HusqvarnaAutomowerBleConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=self.add_suggested_values_to_schema(
-                vol.Schema(
-                    {
-                        vol.Required(CONF_PIN): str,
-                    },
-                ),
-                {CONF_PIN: self.pin},
+                REAUTH_SCHEMA, {CONF_PIN: self.pin}
             ),
             description_placeholders={"name": self.mower_name},
             errors=errors,

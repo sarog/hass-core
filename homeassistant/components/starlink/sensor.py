@@ -1,11 +1,9 @@
 """Contains sensors exposed by the Starlink integration."""
 
-from __future__ import annotations
-
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 from homeassistant.components.sensor import (
     RestoreSensor,
@@ -28,6 +26,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
 from homeassistant.util.dt import now
+from homeassistant.util.variance import ignore_variance
 
 from .coordinator import StarlinkConfigEntry, StarlinkData
 from .entity import StarlinkEntity
@@ -40,13 +39,8 @@ async def async_setup_entry(
 ) -> None:
     """Set up all sensors for this entry."""
     async_add_entities(
-        StarlinkSensorEntity(config_entry.runtime_data, description)
+        description.entity_class(config_entry.runtime_data, description)
         for description in SENSORS
-    )
-
-    async_add_entities(
-        StarlinkRestoreSensor(config_entry.runtime_data, description)
-        for description in RESTORE_SENSORS
     )
 
 
@@ -55,6 +49,7 @@ class StarlinkSensorEntityDescription(SensorEntityDescription):
     """Describes a Starlink sensor entity."""
 
     value_fn: Callable[[StarlinkData], datetime | StateType]
+    entity_class: Callable
 
 
 class StarlinkSensorEntity(StarlinkEntity, SensorEntity):
@@ -63,25 +58,28 @@ class StarlinkSensorEntity(StarlinkEntity, SensorEntity):
     entity_description: StarlinkSensorEntityDescription
 
     @property
+    @override
     def native_value(self) -> StateType | datetime:
         """Calculate the sensor value from the entity description."""
         return self.entity_description.value_fn(self.coordinator.data)
 
 
-class StarlinkRestoreSensor(StarlinkSensorEntity, RestoreSensor):
-    """A RestoreSensorEntity for Starlink devices. Handles creating unique IDs."""
+class StarlinkAccumulationSensor(StarlinkSensorEntity, RestoreSensor):
+    """A StarlinkAccumulationSensor for Starlink devices."""
 
     _attr_native_value: int | float = 0
 
     @property
+    @override
     def native_value(self) -> int | float:
-        """Calculate the sensor value from current value and the entity description."""
+        """Calculate new value from current value and the entity description."""
         new_value = super().native_value
         if TYPE_CHECKING:
             assert isinstance(new_value, (int, float))
         self._attr_native_value += new_value
         return self._attr_native_value
 
+    @override
     async def async_added_to_hass(self) -> None:
         """When entity is added to hass."""
         await super().async_added_to_hass()
@@ -95,6 +93,10 @@ class StarlinkRestoreSensor(StarlinkSensorEntity, RestoreSensor):
             self._attr_native_value = last_native_value
 
 
+uptime_to_stable_datetime = ignore_variance(
+    lambda value: now() - timedelta(seconds=value), timedelta(minutes=1)
+)
+
 SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
     StarlinkSensorEntityDescription(
         key="ping",
@@ -103,6 +105,7 @@ SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfTime.MILLISECONDS,
         suggested_display_precision=0,
         value_fn=lambda data: data.status["pop_ping_latency_ms"],
+        entity_class=StarlinkSensorEntity,
     ),
     StarlinkSensorEntityDescription(
         key="azimuth",
@@ -113,6 +116,7 @@ SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
         entity_registry_enabled_default=False,
         suggested_display_precision=0,
         value_fn=lambda data: data.status["direction_azimuth"],
+        entity_class=StarlinkSensorEntity,
     ),
     StarlinkSensorEntityDescription(
         key="elevation",
@@ -123,6 +127,7 @@ SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
         entity_registry_enabled_default=False,
         suggested_display_precision=0,
         value_fn=lambda data: data.status["direction_elevation"],
+        entity_class=StarlinkSensorEntity,
     ),
     StarlinkSensorEntityDescription(
         key="uplink_throughput",
@@ -133,6 +138,7 @@ SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
         suggested_display_precision=1,
         suggested_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND,
         value_fn=lambda data: data.status["uplink_throughput_bps"],
+        entity_class=StarlinkSensorEntity,
     ),
     StarlinkSensorEntityDescription(
         key="downlink_throughput",
@@ -143,15 +149,15 @@ SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
         suggested_display_precision=1,
         suggested_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND,
         value_fn=lambda data: data.status["downlink_throughput_bps"],
+        entity_class=StarlinkSensorEntity,
     ),
     StarlinkSensorEntityDescription(
         key="last_boot_time",
-        translation_key="last_boot_time",
+        translation_key="last_restart",
         device_class=SensorDeviceClass.TIMESTAMP,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda data: (
-            now() - timedelta(seconds=data.status["uptime"], milliseconds=-500)
-        ).replace(microsecond=0),
+        value_fn=lambda data: uptime_to_stable_datetime(data.status["uptime"]),
+        entity_class=StarlinkSensorEntity,
     ),
     StarlinkSensorEntityDescription(
         key="ping_drop_rate",
@@ -159,6 +165,7 @@ SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         value_fn=lambda data: data.status["pop_ping_drop_rate"] * 100,
+        entity_class=StarlinkSensorEntity,
     ),
     StarlinkSensorEntityDescription(
         key="power",
@@ -167,9 +174,8 @@ SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfPower.WATT,
         suggested_display_precision=0,
         value_fn=lambda data: data.consumption["latest_power"],
+        entity_class=StarlinkSensorEntity,
     ),
-)
-RESTORE_SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
     StarlinkSensorEntityDescription(
         key="energy",
         device_class=SensorDeviceClass.ENERGY,
@@ -177,6 +183,7 @@ RESTORE_SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         suggested_display_precision=1,
         value_fn=lambda data: data.consumption["total_energy"],
+        entity_class=StarlinkAccumulationSensor,
     ),
     StarlinkSensorEntityDescription(
         key="download",
@@ -187,6 +194,7 @@ RESTORE_SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
         suggested_display_precision=1,
         suggested_unit_of_measurement=UnitOfInformation.GIGABYTES,
         value_fn=lambda data: data.usage["download_usage"],
+        entity_class=StarlinkAccumulationSensor,
     ),
     StarlinkSensorEntityDescription(
         key="upload",
@@ -197,5 +205,6 @@ RESTORE_SENSORS: tuple[StarlinkSensorEntityDescription, ...] = (
         suggested_display_precision=1,
         suggested_unit_of_measurement=UnitOfInformation.GIGABYTES,
         value_fn=lambda data: data.usage["upload_usage"],
+        entity_class=StarlinkAccumulationSensor,
     ),
 )

@@ -1,11 +1,8 @@
 """The sql component."""
 
-from __future__ import annotations
-
 import logging
 from typing import Any
 
-import sqlparse
 import voluptuous as vol
 
 from homeassistant.components.recorder import CONF_DB_URL, get_instance
@@ -34,34 +31,25 @@ from homeassistant.helpers.trigger_template_entity import (
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
-    CONF_ADVANCED_OPTIONS,
+    CONF_ADDITIONAL_OPTIONS,
     CONF_COLUMN_NAME,
     CONF_QUERY,
     DOMAIN,
     PLATFORMS,
 )
-from .util import redact_credentials
+from .services import async_setup_services
+from .util import redact_credentials, validate_sql_select
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def validate_sql_select(value: str) -> str:
-    """Validate that value is a SQL SELECT query."""
-    if len(query := sqlparse.parse(value.lstrip().lstrip(";"))) > 1:
-        raise vol.Invalid("Multiple SQL queries are not supported")
-    if len(query) == 0 or (query_type := query[0].get_type()) == "UNKNOWN":
-        raise vol.Invalid("Invalid SQL query")
-    if query_type != "SELECT":
-        _LOGGER.debug("The SQL query %s is of type %s", query, query_type)
-        raise vol.Invalid("Only SELECT queries allowed")
-    return str(query[0])
 
 
 QUERY_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_COLUMN_NAME): cv.string,
         vol.Required(CONF_NAME): cv.template,
-        vol.Required(CONF_QUERY): vol.All(cv.string, validate_sql_select),
+        vol.Required(CONF_QUERY): vol.All(
+            cv.template, ValueTemplate.from_template, validate_sql_select
+        ),
         vol.Optional(CONF_UNIT_OF_MEASUREMENT): cv.string,
         vol.Optional(CONF_VALUE_TEMPLATE): vol.All(
             cv.template, ValueTemplate.from_template
@@ -84,6 +72,8 @@ CONFIG_SCHEMA = vol.Schema(
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up SQL from yaml config."""
+    async_setup_services(hass)
+
     if (conf := config.get(DOMAIN)) is None:
         return True
 
@@ -118,10 +108,6 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate old entry."""
     _LOGGER.debug("Migrating from version %s.%s", entry.version, entry.minor_version)
 
-    if entry.version > 1:
-        # This means the user has downgraded from a future version
-        return False
-
     if entry.version == 1:
         old_options = {**entry.options}
         new_data = {}
@@ -134,7 +120,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         new_options[CONF_COLUMN_NAME] = old_options.get(CONF_COLUMN_NAME)
         new_options[CONF_QUERY] = old_options.get(CONF_QUERY)
-        new_options[CONF_ADVANCED_OPTIONS] = {}
+        new_options[CONF_ADDITIONAL_OPTIONS] = {}
 
         for key in (
             CONF_VALUE_TEMPLATE,
@@ -143,11 +129,18 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_STATE_CLASS,
         ):
             if (value := old_options.get(key)) is not None:
-                new_options[CONF_ADVANCED_OPTIONS][key] = value
+                new_options[CONF_ADDITIONAL_OPTIONS][key] = value
 
         hass.config_entries.async_update_entry(
             entry, data=new_data, options=new_options, version=2
         )
+
+    if entry.version == 2:
+        new_options = {**entry.options}
+        # The "advanced_options" section was renamed to "additional_options"
+        if (additional := new_options.pop("advanced_options", None)) is not None:
+            new_options[CONF_ADDITIONAL_OPTIONS] = additional
+        hass.config_entries.async_update_entry(entry, options=new_options, version=3)
 
     _LOGGER.debug(
         "Migration to version %s.%s successful",

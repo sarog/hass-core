@@ -1,7 +1,5 @@
 """Configuration for VeSync tests."""
 
-from __future__ import annotations
-
 from collections.abc import Iterator
 from contextlib import ExitStack
 from itertools import chain
@@ -10,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, PropertyMock, patch
 
 import pytest
 from pyvesync import VeSync
+from pyvesync.auth import VeSyncAuth
 from pyvesync.base_devices.bulb_base import VeSyncBulb
 from pyvesync.base_devices.fan_base import VeSyncFanBase
 from pyvesync.base_devices.humidifier_base import HumidifierState
@@ -31,15 +30,6 @@ from tests.test_util.aiohttp import AiohttpClientMocker
 
 
 @pytest.fixture(autouse=True)
-def patch_vesync_firmware():
-    """Patch VeSync to disable firmware checks."""
-    with patch(
-        "pyvesync.vesync.VeSync.check_firmware", new=AsyncMock(return_value=True)
-    ):
-        yield
-
-
-@pytest.fixture(autouse=True)
 def patch_vesync_login():
     """Patch VeSync login method."""
     with patch("pyvesync.vesync.VeSync.login", new=AsyncMock()):
@@ -51,21 +41,39 @@ def patch_vesync():
     """Patch VeSync methods and several properties/attributes for all tests."""
     props = {
         "enabled": True,
-        "token": "TEST_TOKEN",
-        "account_id": "TEST_ACCOUNT_ID",
+    }
+
+    with ExitStack() as stack:
+        for name, value in props.items():
+            mock = stack.enter_context(
+                patch.object(VeSync, name, new_callable=PropertyMock)
+            )
+            mock.return_value = value
+        yield
+
+
+@pytest.fixture(autouse=True)
+def patch_vesync_auth():
+    """Patch VeSync Auth methods and several properties/attributes for all tests."""
+    props = {
+        "_token": "TESTTOKEN",
+        "_account_id": "TESTACCOUNTID",
+        "_country_code": "US",
+        "_current_region": "US",
+        "_username": "TESTUSERNAME",
+        "_password": "TESTPASSWORD",
     }
 
     with (
         patch.multiple(
-            "pyvesync.vesync.VeSync",
-            check_firmware=AsyncMock(return_value=True),
-            login=AsyncMock(return_value=None),
+            "pyvesync.auth.VeSyncAuth",
+            login=AsyncMock(return_value=True),
         ),
         ExitStack() as stack,
     ):
         for name, value in props.items():
             mock = stack.enter_context(
-                patch.object(VeSync, name, new_callable=PropertyMock)
+                patch.object(VeSyncAuth, name, new_callable=PropertyMock)
             )
             mock.return_value = value
         yield
@@ -78,6 +86,9 @@ def config_entry_fixture(hass: HomeAssistant, config) -> ConfigEntry:
         title="VeSync",
         domain=DOMAIN,
         data=config[DOMAIN],
+        unique_id="TESTACCOUNTID",
+        version=1,
+        minor_version=3,
     )
     entry.add_to_hass(hass)
     return entry
@@ -134,10 +145,12 @@ def fan_fixture():
         cid="fan",
         device_type="fan",
         device_name="Test Fan",
+        product_type="fan",
         device_status="on",
         modes=[],
         connection_status="online",
         current_firm_version="1.0.0",
+        latest_firm_version="1.0.1",
     )
 
 
@@ -146,6 +159,7 @@ def bulb_fixture():
     """Create a mock VeSync bulb fixture."""
     return Mock(
         VeSyncBulb,
+        product_type="bulb",
         cid="bulb",
         device_name="Test Bulb",
     )
@@ -156,6 +170,7 @@ def switch_fixture():
     """Create a mock VeSync switch fixture."""
     return Mock(
         VeSyncSwitch,
+        product_type="switch",
         is_dimmable=Mock(return_value=False),
     )
 
@@ -165,6 +180,7 @@ def dimmable_switch_fixture():
     """Create a mock VeSync switch fixture."""
     return Mock(
         VeSyncSwitch,
+        product_type="switch",
         is_dimmable=Mock(return_value=True),
     )
 
@@ -175,6 +191,7 @@ def outlet_fixture():
     return Mock(
         VeSyncOutlet,
         cid="outlet",
+        product_type="outlet",
         device_name="Test Outlet",
     )
 
@@ -192,6 +209,7 @@ def humidifier_fixture():
         },
         features=[HumidifierFeatures.NIGHTLIGHT],
         device_type="Classic200S",
+        product_type="humidifier",
         device_name="Humidifier 200s",
         device_status="on",
         mist_modes=["auto", "manual"],
@@ -211,6 +229,7 @@ def humidifier_fixture():
         ),
         connection_status="online",
         current_firm_version="1.0.0",
+        latest_firm_version="1.0.1",
     )
 
 
@@ -227,6 +246,7 @@ def humidifier_300s_fixture():
         },
         features=[HumidifierFeatures.NIGHTLIGHT],
         device_type="Classic300S",
+        product_type="humidifier",
         device_name="Humidifier 300s",
         device_status="on",
         mist_modes=["auto", "manual"],
@@ -246,6 +266,7 @@ def humidifier_300s_fixture():
         ),
         config_module="configModule",
         current_firm_version="1.0.0",
+        latest_firm_version="1.0.1",
     )
 
 
@@ -258,6 +279,9 @@ async def humidifier_config_entry(
         title="VeSync",
         domain=DOMAIN,
         data=config[DOMAIN],
+        unique_id="TESTACCOUNTID",
+        version=1,
+        minor_version=3,
     )
     entry.add_to_hass(hass)
 
@@ -293,6 +317,9 @@ async def fan_config_entry(
         title="VeSync",
         domain=DOMAIN,
         data=config[DOMAIN],
+        unique_id="TESTACCOUNTID",
+        version=1,
+        minor_version=3,
     )
     entry.add_to_hass(hass)
 
@@ -304,11 +331,34 @@ async def fan_config_entry(
     return entry
 
 
+@pytest.fixture(name="pedestal_fan_config_entry")
+async def pedestal_fan_config_entry(
+    hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, config
+) -> MockConfigEntry:
+    """Create a mock VeSync config entry for `CoreBreeze 432S`."""
+    entry = MockConfigEntry(
+        title="VeSync",
+        domain=DOMAIN,
+        data=config[DOMAIN],
+        unique_id="TESTACCOUNTID",
+        version=1,
+        minor_version=3,
+    )
+    entry.add_to_hass(hass)
+
+    device_name = "CoreBreeze 432S"
+    mock_multiple_device_responses(aioclient_mock, [device_name])
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    return entry
+
+
 @pytest.fixture(name="switch_old_id_config_entry")
 async def switch_old_id_config_entry(
     hass: HomeAssistant, aioclient_mock: AiohttpClientMocker, config
 ) -> MockConfigEntry:
-    """Create a mock VeSync config entry for `switch` with the old unique ID approach."""
+    """Create a mock VeSync config entry for switch with old unique ID."""
     entry = MockConfigEntry(
         title="VeSync",
         domain=DOMAIN,

@@ -1,7 +1,5 @@
 """Unit system helper class and methods."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from numbers import Number
 from typing import TYPE_CHECKING, Final
@@ -23,6 +21,7 @@ from homeassistant.const import (
     UnitOfMass,
     UnitOfPrecipitationDepth,
     UnitOfPressure,
+    UnitOfRadiationConcentration,
     UnitOfSpeed,
     UnitOfTemperature,
     UnitOfVolume,
@@ -296,6 +295,12 @@ METRIC_SYSTEM = UnitSystem(
         # Convert non-metric pressure
         ("pressure", UnitOfPressure.PSI): UnitOfPressure.KPA,
         ("pressure", UnitOfPressure.INHG): UnitOfPressure.HPA,
+        ("pressure", UnitOfPressure.INH2O): UnitOfPressure.KPA,
+        # Convert non-metric radon concentration
+        (
+            "radon",
+            UnitOfRadiationConcentration.PICOCURIES_PER_LITER,
+        ): UnitOfRadiationConcentration.BECQUEREL_PER_CUBIC_METER,
         # Convert non-metric speeds except knots to km/h
         ("speed", UnitOfSpeed.FEET_PER_SECOND): UnitOfSpeed.KILOMETERS_PER_HOUR,
         ("speed", UnitOfSpeed.INCHES_PER_SECOND): UnitOfSpeed.MILLIMETERS_PER_SECOND,
@@ -375,11 +380,19 @@ US_CUSTOMARY_SYSTEM = UnitSystem(
         ("pressure", UnitOfPressure.MBAR): UnitOfPressure.PSI,
         ("pressure", UnitOfPressure.CBAR): UnitOfPressure.PSI,
         ("pressure", UnitOfPressure.BAR): UnitOfPressure.PSI,
+        ("pressure", UnitOfPressure.MILLIPASCAL): UnitOfPressure.PSI,
         ("pressure", UnitOfPressure.PA): UnitOfPressure.PSI,
         ("pressure", UnitOfPressure.HPA): UnitOfPressure.PSI,
         ("pressure", UnitOfPressure.KPA): UnitOfPressure.PSI,
         ("pressure", UnitOfPressure.MMHG): UnitOfPressure.INHG,
+        ("pressure", UnitOfPressure.INH2O): UnitOfPressure.PSI,
+        # Convert non-USCS radon concentration
+        (
+            "radon",
+            UnitOfRadiationConcentration.BECQUEREL_PER_CUBIC_METER,
+        ): UnitOfRadiationConcentration.PICOCURIES_PER_LITER,
         # Convert non-USCS speeds, except knots, to mph
+        ("speed", UnitOfSpeed.METERS_PER_MINUTE): UnitOfSpeed.INCHES_PER_SECOND,
         ("speed", UnitOfSpeed.METERS_PER_SECOND): UnitOfSpeed.MILES_PER_HOUR,
         ("speed", UnitOfSpeed.MILLIMETERS_PER_SECOND): UnitOfSpeed.INCHES_PER_SECOND,
         ("speed", UnitOfSpeed.KILOMETERS_PER_HOUR): UnitOfSpeed.MILES_PER_HOUR,

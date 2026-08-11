@@ -1,7 +1,5 @@
 """Provide functionality for TTS."""
 
-from __future__ import annotations
-
 import asyncio
 from collections.abc import AsyncGenerator, MutableMapping
 from dataclasses import dataclass, field
@@ -16,7 +14,7 @@ from pathlib import Path
 import re
 import secrets
 from time import monotonic
-from typing import Any, Final, Generic, Protocol, TypeVar
+from typing import Any, Final, Protocol
 
 from aiohttp import web
 import mutagen
@@ -27,7 +25,6 @@ import voluptuous as vol
 from homeassistant.components import ffmpeg, websocket_api
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.components.media_source import (
-    async_resolve_media,
     generate_media_source_id as ms_generate_media_source_id,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -43,7 +40,6 @@ from homeassistant.core import (
 )
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.network import get_url
@@ -144,7 +140,7 @@ class TTSCache:
     """If an error occurred while loading, contains the error."""
 
     _consumers: list[asyncio.Queue[bytes | None]] | None = None
-    """A queue for each current consumer to notify of new data while the generator is loading."""
+    """Queue for consumers to receive data while loading."""
 
     def __init__(
         self,
@@ -420,7 +416,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     try:
         await tts.async_init_cache()
-    except (HomeAssistantError, KeyError):
+    except HomeAssistantError, KeyError:
         _LOGGER.exception("Error on cache init")
         return False
 
@@ -503,7 +499,7 @@ class ResultStream:
     _manager: SpeechManager
 
     # Override
-    _override_media_id: str | None = None
+    _override_media_path: Path | None = None
 
     @cached_property
     def url(self) -> str:
@@ -529,6 +525,8 @@ class ResultStream:
 
         This method will leverage a disk cache to speed up generation.
         """
+        if self._result_cache.done():
+            return
         self._result_cache.set_result(
             self._manager.async_cache_message_in_memory(
                 engine=self.engine,
@@ -545,6 +543,8 @@ class ResultStream:
 
         This method can result in faster first byte when generating long responses.
         """
+        if self._result_cache.done():
+            return
         self._result_cache.set_result(
             self._manager.async_cache_message_stream_in_memory(
                 engine=self.engine,
@@ -556,7 +556,7 @@ class ResultStream:
 
     async def async_stream_result(self) -> AsyncGenerator[bytes]:
         """Get the stream of this result."""
-        if self._override_media_id is not None:
+        if self._override_media_path is not None:
             # Overridden
             async for chunk in self._async_stream_override_result():
                 yield chunk
@@ -570,49 +570,72 @@ class ResultStream:
 
         self.last_used = monotonic()
 
-    def async_override_result(self, media_id: str) -> None:
-        """Override the TTS stream with a different media id."""
-        self._override_media_id = media_id
+    def async_override_result(self, media_path: str | Path) -> None:
+        """Override the TTS stream with a different media path."""
+        self._override_media_path = Path(media_path)
+
+    @property
+    def _needs_conversion(self) -> bool:
+        """Return if the result requires conversion to a preferred format."""
+        return any(
+            self.options.get(option) is not None
+            for option in (
+                ATTR_PREFERRED_FORMAT,
+                ATTR_PREFERRED_SAMPLE_RATE,
+                ATTR_PREFERRED_SAMPLE_CHANNELS,
+                ATTR_PREFERRED_SAMPLE_BYTES,
+            )
+        )
+
+    @callback
+    def async_get_media_path(self) -> Path | None:
+        """Return the path to the result on disk, if available."""
+        if self._override_media_path is not None:
+            # An override that needs conversion no longer matches the file on
+            # disk, so the result is only available through the stream.
+            if self._needs_conversion:
+                return None
+            return self._override_media_path
+
+        if not self.use_file_cache or not self._result_cache.done():
+            return None
+
+        return self._manager.async_get_cache_file_path(
+            self._result_cache.result().cache_key
+        )
 
     async def _async_stream_override_result(self) -> AsyncGenerator[bytes]:
         """Get the stream of the overridden result."""
-        assert self._override_media_id is not None
-        media = await async_resolve_media(self.hass, self._override_media_id)
+        assert self._override_media_path is not None
 
-        # Determine if we need to do audio conversion
-        preferred_extension: str | None = self.options.get(ATTR_PREFERRED_FORMAT)
-        sample_rate: int | None = self.options.get(ATTR_PREFERRED_SAMPLE_RATE)
-        sample_channels: int | None = self.options.get(ATTR_PREFERRED_SAMPLE_CHANNELS)
-        sample_bytes: int | None = self.options.get(ATTR_PREFERRED_SAMPLE_BYTES)
+        preferred_format = self.options.get(ATTR_PREFERRED_FORMAT)
 
-        needs_conversion = (
-            preferred_extension
-            or (sample_rate is not None)
-            or (sample_channels is not None)
-            or (sample_bytes is not None)
-        )
-
-        if not needs_conversion:
-            # Stream directly from URL (no conversion)
-            session = async_get_clientsession(self.hass)
-            async with session.get(media.url) as response:
-                async for chunk in response.content:
-                    yield chunk
-
+        if not self._needs_conversion:
+            # Read file directly (no conversion)
+            yield await self.hass.async_add_executor_job(
+                self._override_media_path.read_bytes
+            )
             return
 
         # Use ffmpeg to convert audio to preferred format
+        if not preferred_format:
+            preferred_format = self._override_media_path.suffix[1:]  # strip .
+
         converted_audio = _async_convert_audio(
             self.hass,
             from_extension=None,
-            audio_input=media.path or media.url,
-            to_extension=preferred_extension,
-            to_sample_rate=sample_rate,
-            to_sample_channels=sample_channels,
-            to_sample_bytes=sample_bytes,
+            audio_input=self._override_media_path,
+            to_extension=preferred_format,
+            to_sample_rate=self.options.get(ATTR_PREFERRED_SAMPLE_RATE),
+            to_sample_channels=self.options.get(ATTR_PREFERRED_SAMPLE_CHANNELS),
+            to_sample_bytes=self.options.get(ATTR_PREFERRED_SAMPLE_BYTES),
         )
         async for chunk in converted_audio:
             yield chunk
+
+    def delete(self) -> None:
+        """Remove the result stream from the manager."""
+        self._manager.async_delete_result_stream(self.token)
 
 
 def _hash_options(options: dict) -> str:
@@ -631,10 +654,7 @@ class HasLastUsed(Protocol):
     last_used: float
 
 
-T = TypeVar("T", bound=HasLastUsed)
-
-
-class DictCleaning(Generic[T]):
+class DictCleaning[T: HasLastUsed]:
     """Helper to clean up the stale sessions."""
 
     unsub: CALLBACK_TYPE | None = None
@@ -750,6 +770,13 @@ class SpeechManager:
         await task
 
     @callback
+    def async_get_cache_file_path(self, cache_key: str) -> Path | None:
+        """Return the path to a cached TTS file, if it is in the file cache."""
+        if not (filename := self.file_cache.get(cache_key)):
+            return None
+        return Path(self.cache_dir) / filename
+
+    @callback
     def async_register_legacy_engine(
         self, engine: str, provider: Provider, config: ConfigType
     ) -> None:
@@ -812,6 +839,11 @@ class SpeechManager:
         if stream:
             stream.last_used = monotonic()
         return stream
+
+    @callback
+    def async_delete_result_stream(self, token: str) -> None:
+        """Delete a result stream given a token."""
+        self.token_to_stream.pop(token, None)
 
     @callback
     def async_create_result_stream(
@@ -1304,7 +1336,6 @@ class TextToSpeechView(HomeAssistantView):
                     await response.prepare(request)
 
                 await response.write(data)
-        # pylint: disable=broad-except
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("Error streaming tts: %s", err)
 

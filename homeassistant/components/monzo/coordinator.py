@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 import logging
 from pprint import pformat
-from typing import Any
+from typing import Any, override
 
 from monzopy import AuthorisationExpiredError, InvalidMonzoAPIResponseError
 
@@ -18,22 +18,27 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
+type MonzoConfigEntry = ConfigEntry[MonzoCoordinator]
+
 
 @dataclass
 class MonzoData:
     """A dataclass for holding sensor data returned by the DataUpdateCoordinator."""
 
-    accounts: list[dict[str, Any]]
-    pots: list[dict[str, Any]]
+    accounts: dict[str, dict[str, Any]]
+    pots: dict[str, dict[str, Any]]
 
 
 class MonzoCoordinator(DataUpdateCoordinator[MonzoData]):
     """Class to manage fetching Monzo data from the API."""
 
-    config_entry: ConfigEntry
+    config_entry: MonzoConfigEntry
 
     def __init__(
-        self, hass: HomeAssistant, config_entry: ConfigEntry, api: AuthenticatedMonzoAPI
+        self,
+        hass: HomeAssistant,
+        config_entry: MonzoConfigEntry,
+        api: AuthenticatedMonzoAPI,
     ) -> None:
         """Initialize."""
         super().__init__(
@@ -45,6 +50,7 @@ class MonzoCoordinator(DataUpdateCoordinator[MonzoData]):
         )
         self.api = api
 
+    @override
     async def _async_update_data(self) -> MonzoData:
         """Fetch data from Monzo API."""
         try:
@@ -64,4 +70,7 @@ class MonzoCoordinator(DataUpdateCoordinator[MonzoData]):
                 message += " Enabling debug logging for details."
             raise UpdateFailed(message) from err
 
-        return MonzoData(accounts, pots)
+        return MonzoData(
+            accounts={account["id"]: account for account in accounts},
+            pots={pot["id"]: pot for pot in pots},
+        )

@@ -1,8 +1,7 @@
 """Matter Fan platform support."""
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, override
 
 from chip.clusters import Objects as clusters
 
@@ -13,13 +12,12 @@ from homeassistant.components.fan import (
     FanEntityDescription,
     FanEntityFeature,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .entity import MatterEntity
-from .helpers import get_matter
+from .entity import MatterEntity, MatterEntityDescription
+from .helpers import MatterConfigEntry
 from .models import MatterDiscoverySchema
 
 FanControlFeature = clusters.FanControl.Bitmaps.Feature
@@ -44,12 +42,17 @@ PRESET_SLEEP_WIND = "sleep_wind"
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry: ConfigEntry,
+    config_entry: MatterConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Matter fan from Config Entry."""
-    matter = get_matter(hass)
+    matter = config_entry.runtime_data.adapter
     matter.register_platform_handler(Platform.FAN, async_add_entities)
+
+
+@dataclass(frozen=True, kw_only=True)
+class MatterFanEntityDescription(FanEntityDescription, MatterEntityDescription):
+    """Describe Matter Fan entities."""
 
 
 class MatterFan(MatterEntity, FanEntity):
@@ -61,6 +64,7 @@ class MatterFan(MatterEntity, FanEntity):
     _feature_map: int | None = None
     _platform_translation_key = "fan"
 
+    @override
     async def async_turn_on(
         self,
         percentage: int | None = None,
@@ -91,6 +95,7 @@ class MatterFan(MatterEntity, FanEntity):
             assert preset_mode is not None
         await self.async_set_preset_mode(preset_mode)
 
+    @override
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn fan off."""
         # clear the wind setting if its currently set
@@ -101,6 +106,7 @@ class MatterFan(MatterEntity, FanEntity):
             matter_attribute=clusters.FanControl.Attributes.FanMode,
         )
 
+    @override
     async def async_set_percentage(self, percentage: int) -> None:
         """Set the speed of the fan, as a percentage."""
         await self.write_attribute(
@@ -108,6 +114,7 @@ class MatterFan(MatterEntity, FanEntity):
             matter_attribute=clusters.FanControl.Attributes.PercentSetting,
         )
 
+    @override
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode."""
         # handle wind as preset
@@ -124,6 +131,7 @@ class MatterFan(MatterEntity, FanEntity):
             matter_attribute=clusters.FanControl.Attributes.FanMode,
         )
 
+    @override
     async def async_oscillate(self, oscillating: bool) -> None:
         """Oscillate the fan."""
         await self.write_attribute(
@@ -137,6 +145,7 @@ class MatterFan(MatterEntity, FanEntity):
             matter_attribute=clusters.FanControl.Attributes.RockSetting,
         )
 
+    @override
     async def async_set_direction(self, direction: str) -> None:
         """Set the direction of the fan."""
         await self.write_attribute(
@@ -162,13 +171,16 @@ class MatterFan(MatterEntity, FanEntity):
         )
 
     @callback
+    @override
     def _update_from_device(self) -> None:
         """Update from device."""
         self._calculate_features()
 
         if self.get_matter_attribute_value(clusters.OnOff.Attributes.OnOff) is False:
-            # special case: the appliance has a dedicated Power switch on the OnOff cluster
-            # if the mains power is off - treat it as if the fan mode is off
+            # special case: the appliance has a dedicated Power
+            # switch on the OnOff cluster
+            # if the mains power is off - treat it as if the
+            # fan mode is off
             self._attr_preset_mode = None
             self._attr_percentage = 0
             return
@@ -248,8 +260,10 @@ class MatterFan(MatterEntity, FanEntity):
             return
         self._feature_map = feature_map
         self._attr_supported_features = FanEntityFeature(0)
+        # Reset to default so a featuremap change from MultiSpeed -> non-MultiSpeed
+        # does not leave a stale speed_count / percentage_step.
+        self._attr_speed_count = 100
         if feature_map & FanControlFeature.kMultiSpeed:
-            self._attr_supported_features |= FanEntityFeature.SET_SPEED
             self._attr_speed_count = int(
                 self.get_matter_attribute_value(clusters.FanControl.Attributes.SpeedMax)
             )
@@ -299,8 +313,12 @@ class MatterFan(MatterEntity, FanEntity):
         if feature_map & FanControlFeature.kAirflowDirection:
             self._attr_supported_features |= FanEntityFeature.DIRECTION
 
+        # PercentSetting is always a mandatory attribute of the FanControl cluster,
+        # so percentage-based speed control is always available.
         self._attr_supported_features |= (
-            FanEntityFeature.TURN_OFF | FanEntityFeature.TURN_ON
+            FanEntityFeature.SET_SPEED
+            | FanEntityFeature.TURN_OFF
+            | FanEntityFeature.TURN_ON
         )
 
 
@@ -308,7 +326,7 @@ class MatterFan(MatterEntity, FanEntity):
 DISCOVERY_SCHEMAS = [
     MatterDiscoverySchema(
         platform=Platform.FAN,
-        entity_description=FanEntityDescription(
+        entity_description=MatterFanEntityDescription(
             key="MatterFan",
             name=None,
         ),
@@ -317,7 +335,11 @@ DISCOVERY_SCHEMAS = [
         required_attributes=(
             clusters.FanControl.Attributes.FanMode,
             clusters.FanControl.Attributes.PercentCurrent,
+            clusters.FanControl.Attributes.PercentSetting,
         ),
+        # PercentSetting SHALL be null when FanMode is Auto (spec 4.4.6.3),
+        # so allow null values to not block discovery in that state.
+        allow_none_value=True,
         optional_attributes=(
             clusters.FanControl.Attributes.SpeedSetting,
             clusters.FanControl.Attributes.RockSetting,

@@ -7,6 +7,7 @@ from monzopy.monzopy import UserAccount
 import pytest
 
 from homeassistant.components.application_credentials import (
+    DOMAIN as APPLICATION_CREDENTIALS_DOMAIN,
     ClientCredential,
     async_import_client_credential,
 )
@@ -24,13 +25,13 @@ TEST_ACCOUNTS = [
         "id": "acc_curr",
         "name": "Current Account",
         "type": "uk_retail",
-        "balance": {"balance": 123, "total_balance": 321},
+        "balance": {"balance": 123, "total_balance": 321, "currency": "GBP"},
     },
     {
         "id": "acc_flex",
         "name": "Flex",
         "type": "uk_monzo_flex",
-        "balance": {"balance": 123, "total_balance": 321},
+        "balance": {"balance": 123, "total_balance": 321, "currency": "EUR"},
     },
 ]
 TEST_POTS = [
@@ -39,7 +40,7 @@ TEST_POTS = [
         "name": "Savings",
         "style": "savings",
         "balance": 134578,
-        "currency": "GBP",
+        "currency": "USD",
         "type": "instant_access",
     }
 ]
@@ -50,7 +51,7 @@ USER_ID = 12345
 @pytest.fixture(autouse=True)
 async def setup_credentials(hass: HomeAssistant) -> None:
     """Fixture to setup credentials."""
-    assert await async_setup_component(hass, "application_credentials", {})
+    assert await async_setup_component(hass, APPLICATION_CREDENTIALS_DOMAIN, {})
     await async_import_client_credential(
         hass,
         DOMAIN,
